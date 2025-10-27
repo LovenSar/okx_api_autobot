@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import json
 import requests
 from datetime import datetime, timedelta
+import math
 load_dotenv()
 
 # 初始化AI客户端
@@ -59,6 +60,37 @@ TRADE_CONFIG = {
         'long_term': 96  # 长期趋势
     }
 }
+
+# 将BTC数量换算为OKX合约张数（size），确保不小于1张
+def btc_amount_to_okx_contracts(btc_amount: float) -> int:
+    try:
+        market = exchange.market(TRADE_CONFIG['symbol'])
+        # 优先取统一字段contractSize，回退到原始字段ctVal
+        contract_size = market.get('contractSize') or float(market.get('info', {}).get('ctVal', 0))
+        if not contract_size or contract_size <= 0:
+            # 常见面值：BTC/USDT:USDT 多为 0.001 BTC/张（不同账户可能不同），兜底
+            contract_size = 0.001
+        contracts = math.floor((btc_amount / contract_size) + 1e-9)
+        return max(1, int(contracts))
+    except Exception:
+        return 1
+
+
+def get_contract_size_btc() -> float:
+    try:
+        market = exchange.market(TRADE_CONFIG['symbol'])
+        contract_size = market.get('contractSize') or float(market.get('info', {}).get('ctVal', 0))
+        if not contract_size or contract_size <= 0:
+            contract_size = 0.001
+        return float(contract_size)
+    except Exception:
+        return 0.001
+
+
+def estimate_required_margin_usdt(contracts: int, mark_price_usdt: float, leverage: float) -> float:
+    ct_size_btc = get_contract_size_btc()
+    notional = contracts * ct_size_btc * mark_price_usdt
+    return (notional / max(leverage, 1.0)) * 1.05  # 加5%裕度
 
 # 全局变量存储历史数据
 price_history = []
@@ -111,6 +143,7 @@ web_data = {
 
 # 初始余额（用于计算收益率）
 initial_balance = None
+ACCOUNT_POS_MODE = None  # 'net' 或 'long_short'
 
 
 def setup_exchange():
@@ -128,6 +161,21 @@ def setup_exchange():
         balance = exchange.fetch_balance()
         usdt_balance = balance['USDT']['free']
         print(f"当前USDT余额: {usdt_balance:.2f}")
+
+        # 读取账户持仓模式（净值/套保），用于是否传 posSide
+        try:
+            cfg = exchange.privateGetAccountConfig()
+            data = (cfg.get('data') or [{}])[0]
+            pos_mode_api = (data.get('posMode') or '').lower()  # 期望返回 long_short_mode / net_mode
+            global ACCOUNT_POS_MODE
+            if 'long' in pos_mode_api:
+                ACCOUNT_POS_MODE = 'long_short'
+            else:
+                ACCOUNT_POS_MODE = 'net'
+            print(f"账户持仓模式: {ACCOUNT_POS_MODE}")
+        except Exception as _:
+            print("账户持仓模式获取失败，默认按净值模式处理")
+            ACCOUNT_POS_MODE = 'net'
 
         return True
     except Exception as e:
@@ -794,88 +842,87 @@ def execute_trade(signal_data, price_data):
         return
 
     try:
-        # 获取账户余额（从缓存读取，减少私有接口调用频率）
-        # 若缓存不存在或过期，回退到实时拉取
+        # 获取可用余额（从缓存读取，减少私有接口调用频率）
         usdt_balance = None
         try:
             cached_balance = web_data.get('account_info', {})
             usdt_balance = cached_balance.get('usdt_balance', None)
         except Exception:
             usdt_balance = None
-        
         if usdt_balance is None:
             balance = exchange.fetch_balance()
             usdt_balance = balance['USDT']['free']
-        required_margin = price_data['price'] * TRADE_CONFIG['amount'] / TRADE_CONFIG['leverage']
+
+        # 计算下单张数与保证金需求
+        desired_contracts = btc_amount_to_okx_contracts(TRADE_CONFIG['amount'])
+        mark_price = price_data['price']  # 近似用当前价，最好可调用ticker.markPx
+        required_margin = estimate_required_margin_usdt(desired_contracts, mark_price, TRADE_CONFIG['leverage'])
 
         if usdt_balance is None:
             print("⚠️ 可用余额未知，跳过交易以保证安全")
             return
 
-        if required_margin > usdt_balance * 0.8:  # 使用不超过80%的余额
-            print(f"⚠️ 保证金不足，跳过交易。需要: {required_margin:.2f} USDT, 可用: {usdt_balance:.2f} USDT")
-            return
+        # 若保证金不足，则按比例下调张数（保留>=1张）
+        if required_margin > usdt_balance * 0.8:
+            max_contracts = int((usdt_balance * 0.8) / max(estimate_required_margin_usdt(1, mark_price, TRADE_CONFIG['leverage']), 1e-9))
+            if max_contracts < 1:
+                print(f"⚠️ 保证金不足，跳过交易。需要: {required_margin:.2f} USDT, 可用: {usdt_balance:.2f} USDT")
+                return
+            print(f"⚠️ 保证金不足，自动将下单张数从 {desired_contracts} 调整为 {max_contracts}")
+            desired_contracts = max_contracts
 
         # 执行交易逻辑   tag 是我的经纪商api（不拿白不拿），不会影响大家返佣，介意可以删除
         if signal_data['signal'] == 'BUY':
             if current_position and current_position['side'] == 'short':
                 print("平空仓并开多仓...")
-                # 平空仓
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'buy',
-                    current_position['size'],
-                    params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
-                )
+                # 平空仓（按当前持仓合约数）
+                params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'short'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=current_position['size'], params=params)
                 time.sleep(1)
-                # 开多仓
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'buy',
-                    TRADE_CONFIG['amount'],
-                    params={'tag': '60bb4a8d3416BCDE'}
-                )
+                # 开多仓（将BTC数量换算为合约张数下单）
+                long_size = desired_contracts
+                params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'long'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=params)
             elif current_position and current_position['side'] == 'long':
                 print("已有多头持仓，保持现状")
             else:
                 # 无持仓时开多仓
                 print("开多仓...")
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'buy',
-                    TRADE_CONFIG['amount'],
-                    params={'tag': '60bb4a8d3416BCDE'}
-                )
+                long_size = desired_contracts
+                params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'long'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=params)
 
         elif signal_data['signal'] == 'SELL':
             if current_position and current_position['side'] == 'long':
                 print("平多仓并开空仓...")
-                # 平多仓
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'sell',
-                    current_position['size'],
-                    params={'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
-                )
+                # 平多仓（按当前持仓合约数）
+                params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'long'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=current_position['size'], params=params)
                 time.sleep(1)
-                # 开空仓
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'sell',
-                    TRADE_CONFIG['amount'],
-                    params={'tag': '60bb4a8d3416BCDE'}
-                )
+                # 开空仓（将BTC数量换算为合约张数下单）
+                short_size = desired_contracts
+                params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'short'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=params)
             elif current_position and current_position['side'] == 'short':
                 print("已有空头持仓，保持现状")
             else:
                 # 无持仓时开空仓
                 print("开空仓...")
-                exchange.create_market_order(
-                    TRADE_CONFIG['symbol'],
-                    'sell',
-                    TRADE_CONFIG['amount'],
-                    params={'tag': '60bb4a8d3416BCDE'}
-                )
+                short_size = desired_contracts
+                params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                if ACCOUNT_POS_MODE == 'long_short':
+                    params['posSide'] = 'short'
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=params)
 
         print("订单执行成功")
         
@@ -883,8 +930,14 @@ def execute_trade(signal_data, price_data):
         last_trade_time = datetime.now()
         
         time.sleep(2)
-        position = get_current_position()
-        print(f"更新后持仓: {position}")
+        # 主动刷新一次持仓（交易撮合后可能存在轻微延迟，轮询几次）
+        refreshed_position = None
+        for _ in range(3):
+            time.sleep(1)
+            refreshed_position = get_current_position()
+            if refreshed_position:
+                break
+        print(f"更新后持仓: {refreshed_position}")
         
         # 记录交易历史
         trade_record = {
