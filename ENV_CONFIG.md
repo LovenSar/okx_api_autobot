@@ -15,6 +15,8 @@ AI_PROVIDER=deepseek
 
 # DeepSeek API密钥 (如果使用DeepSeek)
 DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 可选：覆盖默认模型，避免在源码里写死
+DEEPSEEK_MODEL=deepseek-chat
 
 # 阿里百炼API密钥 (如果使用Qwen)
 DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
@@ -23,6 +25,11 @@ DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
 OKX_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
 OKX_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 OKX_PASSWORD=xxxxxxxx
+
+# ========== 情绪API（CryptoOracle） ==========
+# 从源码迁移到环境变量，不要硬编码
+CRYPTO_ORACLE_API_URL=https://service.cryptoracle.network/openapi/v2/endpoint
+CRYPTO_ORACLE_API_KEY=your-crypto-oracle-key
 ```
 
 ---

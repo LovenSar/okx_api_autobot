@@ -29,7 +29,7 @@ else:
         api_key=os.getenv('DEEPSEEK_API_KEY'),
         base_url="https://api.deepseek.com"
     )
-    AI_MODEL = "deepseek-reasoner"
+    AI_MODEL = "deepseek-chat"
     print(f"使用AI模型: DeepSeek {AI_MODEL}")
 
 # 保持向后兼容
@@ -66,6 +66,24 @@ signal_history = []
 position = None
 last_trade_time = None  # 记录上次交易时间
 MIN_TRADE_INTERVAL = 300  # 最小交易间隔（秒），防止过于频繁交易
+
+# 私有接口（余额/持仓）更新节流，避免频繁调用导致限流
+PRIVATE_UPDATE_INTERVAL = 5  # 秒，仅每5秒刷新一次余额和持仓
+last_private_update_ts = 0.0
+
+# 技术分析/情绪数据缓存，降低外部与公共接口压力
+ANALYSIS_UPDATE_INTERVAL = 15  # 秒，整套技术指标刷新间隔
+last_analysis_ts = 0.0
+last_price_data_cache = None
+
+SENTIMENT_TTL = 300  # 秒，情绪数据缓存时间
+_sentiment_cache = { 'ts': 0.0, 'data': None }
+
+# AI 决策节流与缓存，降低DeepSeek调用频率，减少超时
+AI_DECISION_INTERVAL = 15  # 秒，最小AI调用间隔
+last_ai_call_ts = 0.0
+last_ai_decision_cache = None
+ai_backoff_until_ts = 0.0  # 出现超时后退避一段时间
 
 # Web展示相关的全局数据存储
 web_data = {
@@ -192,9 +210,19 @@ def get_support_resistance_levels(df, lookback=20):
 
 def get_sentiment_indicators():
     """获取情绪指标 - 简洁版本"""
+    global _sentiment_cache
     try:
-        API_URL = "https://service.cryptoracle.network/openapi/v2/endpoint"
-        API_KEY = "b54bcf4d-1bca-4e8e-9a24-22ff2c3d76d5"
+        # 使用缓存，降低外部API调用频率
+        now_ts = time.time()
+        if _sentiment_cache['data'] is not None and (now_ts - _sentiment_cache['ts'] < SENTIMENT_TTL):
+            return _sentiment_cache['data']
+
+        # 从环境变量读取（不要硬编码在源码里）
+        API_URL = os.getenv('CRYPTO_ORACLE_API_URL', '').strip()
+        API_KEY = os.getenv('CRYPTO_ORACLE_API_KEY', '').strip()
+        if not API_URL or not API_KEY:
+            print("⚠️ 情绪API配置缺失，请在.env设置 CRYPTO_ORACLE_API_URL / CRYPTO_ORACLE_API_KEY")
+            return None
 
         # 获取最近4小时数据
         end_time = datetime.now()
@@ -248,13 +276,17 @@ def get_sentiment_indicators():
 
                         print(f"✅ 使用情绪数据时间: {period['startTime']} (延迟: {data_delay}分钟)")
 
-                        return {
+                        data_obj = {
                             'positive_ratio': positive,
                             'negative_ratio': negative,
                             'net_sentiment': net_sentiment,
                             'data_time': period['startTime'],
                             'data_delay_minutes': data_delay
                         }
+
+                        # 写入缓存
+                        _sentiment_cache = { 'ts': now_ts, 'data': data_obj }
+                        return data_obj
 
                 print("❌ 所有时间段数据都为空")
                 return None
@@ -299,8 +331,22 @@ def get_market_trend(df):
 
 def get_btc_ohlcv_enhanced():
     """增强版：获取BTC K线数据并计算技术指标"""
+    global last_analysis_ts, last_price_data_cache
     try:
-        # 获取K线数据
+        now_ts = time.time()
+        # 若分析缓存存在且未过期，复用分析数据，并用最新价格覆盖
+        if (last_price_data_cache is not None) and (now_ts - last_analysis_ts < ANALYSIS_UPDATE_INTERVAL):
+            try:
+                # 仅拉取最新收盘价覆盖
+                ohlcv_latest = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'], limit=1)
+                if ohlcv_latest and len(ohlcv_latest) > 0:
+                    last_price_data_cache['price'] = ohlcv_latest[0][4]
+                    last_price_data_cache['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+            return last_price_data_cache
+
+        # 否则重新获取整套K线并计算指标
         ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
                                      limit=TRADE_CONFIG['data_points'])
 
@@ -317,7 +363,7 @@ def get_btc_ohlcv_enhanced():
         trend_analysis = get_market_trend(df)
         levels_analysis = get_support_resistance_levels(df)
 
-        return {
+        result = {
             'price': current_data['close'],
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'high': current_data['high'],
@@ -343,6 +389,11 @@ def get_btc_ohlcv_enhanced():
             'levels_analysis': levels_analysis,
             'full_data': df
         }
+
+        # 写缓存并记录刷新时间
+        last_price_data_cache = result
+        last_analysis_ts = now_ts
+        return result
     except Exception as e:
         print(f"获取增强K线数据失败: {e}")
         return None
@@ -598,8 +649,10 @@ def analyze_with_deepseek(price_data):
 
     try:
         print(f"⏳ 正在调用{AI_PROVIDER.upper()} API ({AI_MODEL})...")
+        # 允许通过环境变量覆盖模型名称（避免硬编码）
+        model_name = os.getenv('DEEPSEEK_MODEL', AI_MODEL)
         response = ai_client.chat.completions.create(
-            model=AI_MODEL,
+            model=model_name,
             messages=[
                 {"role": "system",
                  "content": f"您是一位专业的交易员，专注于{TRADE_CONFIG['timeframe']}周期趋势分析。请结合K线形态和技术指标做出判断，并严格遵循JSON格式要求。"},
@@ -607,7 +660,7 @@ def analyze_with_deepseek(price_data):
             ],
             stream=False,
             temperature=0.1,
-            timeout=30.0  # 30秒超时
+            timeout=60.0  # 将超时提升到60秒，减少timeout概率
         )
         print("✓ API调用成功")
         
@@ -741,10 +794,23 @@ def execute_trade(signal_data, price_data):
         return
 
     try:
-        # 获取账户余额
-        balance = exchange.fetch_balance()
-        usdt_balance = balance['USDT']['free']
+        # 获取账户余额（从缓存读取，减少私有接口调用频率）
+        # 若缓存不存在或过期，回退到实时拉取
+        usdt_balance = None
+        try:
+            cached_balance = web_data.get('account_info', {})
+            usdt_balance = cached_balance.get('usdt_balance', None)
+        except Exception:
+            usdt_balance = None
+        
+        if usdt_balance is None:
+            balance = exchange.fetch_balance()
+            usdt_balance = balance['USDT']['free']
         required_margin = price_data['price'] * TRADE_CONFIG['amount'] / TRADE_CONFIG['leverage']
+
+        if usdt_balance is None:
+            print("⚠️ 可用余额未知，跳过交易以保证安全")
+            return
 
         if required_margin > usdt_balance * 0.8:  # 使用不超过80%的余额
             print(f"⚠️ 保证金不足，跳过交易。需要: {required_margin:.2f} USDT, 可用: {usdt_balance:.2f} USDT")
@@ -840,11 +906,29 @@ def execute_trade(signal_data, price_data):
 
 
 def analyze_with_deepseek_with_retry(price_data, max_retries=2):
-    """带重试的DeepSeek分析"""
+    """带重试与节流/退避的DeepSeek分析"""
+    global last_ai_call_ts, last_ai_decision_cache, ai_backoff_until_ts
+
+    now_ts = time.time()
+    # 若在退避期内，直接使用上次成功的决策（或HOLD）
+    if now_ts < ai_backoff_until_ts and last_ai_decision_cache is not None:
+        print("⏳ DeepSeek处于退避期，复用上次AI决策缓存")
+        return last_ai_decision_cache
+
+    # 若距离上次AI调用小于最小间隔，直接复用缓存
+    if (now_ts - last_ai_call_ts) < AI_DECISION_INTERVAL and last_ai_decision_cache is not None:
+        return last_ai_decision_cache
+
+    # 记录本次调用时间
+    last_ai_call_ts = now_ts
+
     for attempt in range(max_retries):
         try:
             signal_data = analyze_with_deepseek(price_data)
-            if signal_data and not signal_data.get('is_fallback', False):
+            if signal_data:
+                # 成功则更新缓存
+                last_ai_decision_cache = signal_data
+                ai_backoff_until_ts = 0.0
                 return signal_data
 
             print(f"第{attempt + 1}次尝试失败，进行重试...")
@@ -855,10 +939,14 @@ def analyze_with_deepseek_with_retry(price_data, max_retries=2):
             import traceback
             traceback.print_exc()
             if attempt == max_retries - 1:
-                return create_fallback_signal(price_data)
+                # 设置退避：1分钟
+                ai_backoff_until_ts = time.time() + 60
+                # 返回缓存或fallback
+                return last_ai_decision_cache or create_fallback_signal(price_data)
             time.sleep(2)
 
-    return create_fallback_signal(price_data)
+    # 最终返回缓存或fallback
+    return last_ai_decision_cache or create_fallback_signal(price_data)
 
 
 def wait_for_next_period():
@@ -894,7 +982,7 @@ def wait_for_next_period():
 
 def update_realtime_data():
     """实时更新价格和持仓数据（轻量级，不做AI决策）"""
-    global web_data, initial_balance
+    global web_data, initial_balance, last_private_update_ts
     
     try:
         # 获取当前价格（只获取最新一根K线）
@@ -902,26 +990,32 @@ def update_realtime_data():
         if ohlcv and len(ohlcv) > 0:
             current_price = ohlcv[0][4]  # 收盘价
             web_data['current_price'] = current_price
-        
-        # 更新持仓信息
-        web_data['current_position'] = get_current_position()
-        
-        # 更新账户余额
-        balance = exchange.fetch_balance()
-        current_equity = balance['USDT']['total']
-        
-        # 设置初始余额
-        if initial_balance is None:
-            initial_balance = current_equity
-        
-        web_data['account_info'] = {
-            'usdt_balance': balance['USDT']['free'],
-            'total_equity': current_equity
-        }
-        
-        # 更新性能统计
-        if web_data['current_position']:
-            web_data['performance']['total_profit'] = web_data['current_position'].get('unrealized_pnl', 0)
+
+        # 节流：仅每 PRIVATE_UPDATE_INTERVAL 秒更新一次余额与持仓（私有接口）
+        now_ts = time.time()
+        if now_ts - last_private_update_ts >= PRIVATE_UPDATE_INTERVAL:
+            # 更新持仓信息
+            web_data['current_position'] = get_current_position()
+
+            # 更新账户余额
+            balance = exchange.fetch_balance()
+            current_equity = balance['USDT']['total']
+
+            # 设置初始余额
+            if initial_balance is None:
+                initial_balance = current_equity
+
+            web_data['account_info'] = {
+                'usdt_balance': balance['USDT']['free'],
+                'total_equity': current_equity
+            }
+
+            # 更新性能统计
+            if web_data['current_position']:
+                web_data['performance']['total_profit'] = web_data['current_position'].get('unrealized_pnl', 0)
+
+            # 记录更新时间戳
+            last_private_update_ts = now_ts
         
         # 更新时间戳
         web_data['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -955,17 +1049,21 @@ def trading_bot():
 
     # 3. 更新Web数据
     try:
-        balance = exchange.fetch_balance()
-        current_equity = balance['USDT']['total']
+        # 使用缓存的账户信息，避免每秒拉取私有接口
+        account_info = web_data.get('account_info', {})
+        current_equity = account_info.get('total_equity', None)
+        if current_equity is None:
+            # 回退：必要时才主动获取
+            balance = exchange.fetch_balance()
+            current_equity = balance['USDT']['total']
+            web_data['account_info'] = {
+                'usdt_balance': balance['USDT']['free'],
+                'total_equity': current_equity
+            }
         
         # 设置初始余额
-        if initial_balance is None:
+        if initial_balance is None and current_equity is not None:
             initial_balance = current_equity
-        
-        web_data['account_info'] = {
-            'usdt_balance': balance['USDT']['free'],
-            'total_equity': current_equity
-        }
         
         # 记录收益曲线数据
         current_position = get_current_position()
