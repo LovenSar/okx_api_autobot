@@ -48,7 +48,7 @@ echo "[启动] 正在启动Docker容器..."
 echo ""
 
 # 启动容器
-docker-compose up -d
+docker compose up -d
 
 if [ $? -eq 0 ]; then
     echo ""

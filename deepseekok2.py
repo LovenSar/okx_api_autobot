@@ -29,7 +29,7 @@ else:
         api_key=os.getenv('DEEPSEEK_API_KEY'),
         base_url="https://api.deepseek.com"
     )
-    AI_MODEL = "deepseek-chat"
+    AI_MODEL = "deepseek-reasoner"
     print(f"使用AI模型: DeepSeek {AI_MODEL}")
 
 # 保持向后兼容
@@ -48,7 +48,7 @@ exchange = ccxt.okx({
 # 交易参数配置 - 结合两个版本的优点
 TRADE_CONFIG = {
     'symbol': 'BTC/USDT:USDT',  # OKX的合约符号格式
-    'amount': 0.01,  # 交易数量 (BTC)
+    'amount': 0.001,  # 交易数量 (BTC)
     'leverage': 10,  # 杠杆倍数
     'timeframe': '15m',  # 使用15分钟K线
     'test_mode': False,  # 测试模式
@@ -64,6 +64,8 @@ TRADE_CONFIG = {
 price_history = []
 signal_history = []
 position = None
+last_trade_time = None  # 记录上次交易时间
+MIN_TRADE_INTERVAL = 300  # 最小交易间隔（秒），防止过于频繁交易
 
 # Web展示相关的全局数据存储
 web_data = {
@@ -685,12 +687,20 @@ def analyze_with_deepseek(price_data):
 
 
 def execute_trade(signal_data, price_data):
-    """执行交易 - OKX版本（修复保证金检查）"""
-    global position, web_data
+    """执行交易 - OKX版本（增强防频繁交易保护）"""
+    global position, web_data, last_trade_time
 
     current_position = get_current_position()
 
-    # 🔴 紧急修复：防止频繁反转
+    # ⏰ 检查交易间隔（防止过于频繁交易）
+    if last_trade_time is not None:
+        time_since_last_trade = (datetime.now() - last_trade_time).total_seconds()
+        if time_since_last_trade < MIN_TRADE_INTERVAL:
+            remaining_time = MIN_TRADE_INTERVAL - time_since_last_trade
+            print(f"🔒 距上次交易仅 {time_since_last_trade:.0f} 秒，需等待 {remaining_time:.0f} 秒后才能交易")
+            return
+
+    # 🔴 防止频繁反转
     if current_position and signal_data['signal'] != 'HOLD':
         current_side = current_position['side']
         # 修正：正确处理HOLD情况
@@ -802,6 +812,10 @@ def execute_trade(signal_data, price_data):
                 )
 
         print("订单执行成功")
+        
+        # 更新最后交易时间
+        last_trade_time = datetime.now()
+        
         time.sleep(2)
         position = get_current_position()
         print(f"更新后持仓: {position}")
@@ -878,13 +892,46 @@ def wait_for_next_period():
     return seconds_to_wait
 
 
-def trading_bot():
-    # 等待到整点再执行
-    wait_seconds = wait_for_next_period()
-    if wait_seconds > 0:
-        time.sleep(wait_seconds)
+def update_realtime_data():
+    """实时更新价格和持仓数据（轻量级，不做AI决策）"""
+    global web_data, initial_balance
+    
+    try:
+        # 获取当前价格（只获取最新一根K线）
+        ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'], limit=1)
+        if ohlcv and len(ohlcv) > 0:
+            current_price = ohlcv[0][4]  # 收盘价
+            web_data['current_price'] = current_price
+        
+        # 更新持仓信息
+        web_data['current_position'] = get_current_position()
+        
+        # 更新账户余额
+        balance = exchange.fetch_balance()
+        current_equity = balance['USDT']['total']
+        
+        # 设置初始余额
+        if initial_balance is None:
+            initial_balance = current_equity
+        
+        web_data['account_info'] = {
+            'usdt_balance': balance['USDT']['free'],
+            'total_equity': current_equity
+        }
+        
+        # 更新性能统计
+        if web_data['current_position']:
+            web_data['performance']['total_profit'] = web_data['current_position'].get('unrealized_pnl', 0)
+        
+        # 更新时间戳
+        web_data['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+    except Exception as e:
+        print(f"⚠️ 实时数据更新失败: {e}")
 
-    """主交易机器人函数"""
+
+def trading_bot():
+    """主交易机器人函数 - 每分钟执行一次决策"""
     global web_data, initial_balance
     
     print("\n" + "=" * 60)
@@ -990,14 +1037,21 @@ def main():
         print("交易所初始化失败，程序退出")
         return
 
-    print("执行频率: 每15分钟整点执行")
+    print("⏰ 执行频率: 每1秒进行AI决策分析")
+    print("📊 数据更新: 每0.5秒更新一次（每秒2次）")
+    print("🛡️  安全机制: 有防频繁交易保护，不是每次都交易")
 
-    # 循环执行（不使用schedule）
+    # 循环执行
     while True:
-        trading_bot()  # 函数内部会自己等待整点
-
-        # 执行完后等待一段时间再检查（避免频繁循环）
-        time.sleep(60)  # 每分钟检查一次
+        try:
+            trading_bot()  # 执行AI决策和交易
+        except Exception as e:
+            print(f"❌ 交易执行出错: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # 每1秒执行一次决策
+        time.sleep(1)
 
 
 if __name__ == "__main__":

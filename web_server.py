@@ -179,15 +179,32 @@ def run_trading_bot():
     """在独立线程中运行交易机器人"""
     deepseekok2.main()
 
+def run_realtime_update():
+    """后台线程：每0.5秒更新实时数据（每秒2次）"""
+    import time
+    print("📊 启动实时数据更新线程（每秒2次，间隔0.5秒）...")
+    
+    while True:
+        try:
+            deepseekok2.update_realtime_data()
+        except Exception as e:
+            print(f"⚠️ 实时数据更新线程出错: {e}")
+        
+        time.sleep(0.5)  # 每0.5秒更新一次（每秒2次）
+
 if __name__ == '__main__':
-    # 立即初始化数据（不等待15分钟）
+    # 立即初始化数据
     print("\n" + "="*60)
     print("🚀 启动BTC交易机器人Web监控...")
     print("="*60 + "\n")
     
     initialize_data()
     
-    # 启动交易机器人线程
+    # 启动实时数据更新线程（每秒更新）
+    realtime_thread = threading.Thread(target=run_realtime_update, daemon=True)
+    realtime_thread.start()
+    
+    # 启动交易机器人线程（每分钟决策）
     bot_thread = threading.Thread(target=run_trading_bot, daemon=True)
     bot_thread.start()
     
@@ -196,6 +213,10 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("🌐 Web管理界面启动成功！")
     print(f"📊 访问地址: http://localhost:{PORT}")
+    print(f"⏰ AI决策频率: 每1秒分析一次")
+    print(f"📈 数据更新: 每0.5秒刷新（每秒2次）")
+    print(f"🌐 Web界面: 每1秒自动刷新")
+    print(f"🛡️  交易间隔: 最少间隔 {deepseekok2.MIN_TRADE_INTERVAL} 秒")
     print(f"📁 模板目录: {app.template_folder}")
     print(f"📁 静态目录: {app.static_folder}")
     print(f"📄 模板文件存在: {os.path.exists(os.path.join(app.template_folder, 'index.html'))}")

@@ -7,8 +7,8 @@ let confidenceChart = null;
 document.addEventListener('DOMContentLoaded', function() {
     initCharts();
     updateData();
-    // 每10秒更新一次数据
-    setInterval(updateData, 10000);
+    // 每1秒更新一次数据（实时显示价格和持仓）
+    setInterval(updateData, 1000);
 });
 
 // 初始化图表
