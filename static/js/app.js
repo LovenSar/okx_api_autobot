@@ -4,11 +4,19 @@ let signalChart = null;
 let confidenceChart = null;
 
 // 初始化
-document.addEventListener('DOMContentLoaded', function() {
+document.addEventListener('DOMContentLoaded', async function() {
     initCharts();
     updateData();
-    // 每1秒更新一次数据（实时显示价格和持仓）
-    setInterval(updateData, 1000);
+    try {
+        const cfgResp = await fetch('/api/config');
+        const cfg = await cfgResp.json();
+        const intervalMs = (cfg && cfg.frontend_refresh_interval_ms) ? cfg.frontend_refresh_interval_ms : 1000;
+        // 每配置的间隔更新一次数据（实时显示价格和持仓）
+        setInterval(updateData, intervalMs);
+    } catch (e) {
+        // 回退到1秒
+        setInterval(updateData, 1000);
+    }
 });
 
 // 初始化图表

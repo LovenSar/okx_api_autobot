@@ -11,6 +11,7 @@ import requests
 from datetime import datetime, timedelta
 import math
 load_dotenv()
+import config
 
 # 初始化AI客户端
 # 支持DeepSeek和阿里百炼Qwen
@@ -51,7 +52,7 @@ TRADE_CONFIG = {
     'symbol': 'BTC/USDT:USDT',  # OKX的合约符号格式
     'amount': 0.001,  # 交易数量 (BTC)
     'leverage': 10,  # 杠杆倍数
-    'timeframe': '15m',  # 使用15分钟K线
+    'timeframe': config.TIMEFRAME,  # 使用配置的时间框架
     'test_mode': False,  # 测试模式
     'data_points': 96,  # 24小时数据（96根15分钟K线）
     'analysis_periods': {
@@ -97,22 +98,22 @@ price_history = []
 signal_history = []
 position = None
 last_trade_time = None  # 记录上次交易时间
-MIN_TRADE_INTERVAL = 120  # 最小交易间隔（秒），防止过于频繁交易
+MIN_TRADE_INTERVAL = int(config.TRADE_MIN_INTERVAL_SECONDS)  # 最小交易间隔（秒），防止过于频繁交易
 
 # 私有接口（余额/持仓）更新节流，避免频繁调用导致限流
-PRIVATE_UPDATE_INTERVAL = 1  # 秒，仅每5秒刷新一次余额和持仓
+PRIVATE_UPDATE_INTERVAL = float(config.PRIVATE_UPDATE_INTERVAL_SECONDS)  # 秒，仅每N秒刷新一次余额和持仓
 last_private_update_ts = 0.0
 
 # 技术分析/情绪数据缓存，降低外部与公共接口压力
-ANALYSIS_UPDATE_INTERVAL = 60  # 秒，整套技术指标刷新间隔
+ANALYSIS_UPDATE_INTERVAL = float(config.ANALYSIS_UPDATE_INTERVAL_SECONDS)  # 秒，整套技术指标刷新间隔
 last_analysis_ts = 0.0
 last_price_data_cache = None
 
-SENTIMENT_TTL = 30  # 秒，情绪数据缓存时间
+SENTIMENT_TTL = float(config.SENTIMENT_CACHE_TTL_SECONDS)  # 秒，情绪数据缓存时间
 _sentiment_cache = { 'ts': 0.0, 'data': None }
 
 # AI 决策节流与缓存，降低DeepSeek调用频率，减少超时
-AI_DECISION_INTERVAL = 120  # 秒，最小AI调用间隔
+AI_DECISION_INTERVAL = float(config.AI_DECISION_MIN_INTERVAL_SECONDS)  # 秒，最小AI调用间隔
 last_ai_call_ts = 0.0
 last_ai_decision_cache = None
 ai_backoff_until_ts = 0.0  # 出现超时后退避一段时间
@@ -281,7 +282,7 @@ def get_sentiment_indicators():
             "endpoints": ["CO-A-02-01", "CO-A-02-02"],  # 只保留核心指标
             "startTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
             "endTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
-            "timeType": "15m",
+            "timeType": TRADE_CONFIG['timeframe'],
             "token": ["BTC"]
         }
 
@@ -929,7 +930,7 @@ def execute_trade(signal_data, price_data):
         # 更新最后交易时间
         last_trade_time = datetime.now()
         
-        time.sleep(2)
+        time.sleep(PRIVATE_UPDATE_INTERVAL)
         # 主动刷新一次持仓（交易撮合后可能存在轻微延迟，轮询几次）
         refreshed_position = None
         for _ in range(3):
@@ -1188,8 +1189,8 @@ def main():
         print("交易所初始化失败，程序退出")
         return
 
-    print("⏰ 执行频率: 每1秒进行AI决策分析")
-    print("📊 数据更新: 每0.5秒更新一次（每秒2次）")
+    print(f"⏰ 执行频率: 每{config.BACKEND_DECISION_INTERVAL_SECONDS}秒进行AI决策分析")
+    print(f"📊 数据更新: 每{config.BACKEND_REALTIME_UPDATE_INTERVAL_SECONDS}秒更新一次")
     print("🛡️  安全机制: 有防频繁交易保护，不是每次都交易")
 
     # 循环执行
@@ -1201,8 +1202,8 @@ def main():
             import traceback
             traceback.print_exc()
         
-        # 每1秒执行一次决策
-        time.sleep(1)
+        # 执行间隔
+        time.sleep(float(config.BACKEND_DECISION_INTERVAL_SECONDS))
 
 
 if __name__ == "__main__":

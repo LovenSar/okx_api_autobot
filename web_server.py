@@ -9,6 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 导入主程序
 import deepseekok2
+import config
 
 # 明确指定模板和静态文件路径
 app = Flask(__name__, 
@@ -110,6 +111,20 @@ def get_ai_model_info():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/config')
+def get_runtime_config():
+    """提供前端所需的时间与轮询配置"""
+    try:
+        return jsonify({
+            'timeframe': config.TIMEFRAME,
+            'backend_decision_interval_seconds': float(config.BACKEND_DECISION_INTERVAL_SECONDS),
+            'backend_realtime_update_interval_seconds': float(config.BACKEND_REALTIME_UPDATE_INTERVAL_SECONDS),
+            'frontend_refresh_interval_ms': int(config.FRONTEND_REFRESH_INTERVAL_MS),
+            'min_trade_interval_seconds': int(config.TRADE_MIN_INTERVAL_SECONDS)
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/test_ai')
 def test_ai_connection():
     """手动测试AI连接"""
@@ -182,7 +197,7 @@ def run_trading_bot():
 def run_realtime_update():
     """后台线程：每0.5秒更新实时数据（每秒2次）"""
     import time
-    print("📊 启动实时数据更新线程（每秒2次，间隔0.5秒）...")
+    print(f"📊 启动实时数据更新线程（间隔{config.BACKEND_REALTIME_UPDATE_INTERVAL_SECONDS}秒）...")
     
     while True:
         try:
@@ -190,7 +205,7 @@ def run_realtime_update():
         except Exception as e:
             print(f"⚠️ 实时数据更新线程出错: {e}")
         
-        time.sleep(0.5)  # 每0.5秒更新一次（每秒2次）
+        time.sleep(float(config.BACKEND_REALTIME_UPDATE_INTERVAL_SECONDS))
 
 if __name__ == '__main__':
     # 立即初始化数据
@@ -213,9 +228,9 @@ if __name__ == '__main__':
     print("\n" + "="*60)
     print("🌐 Web管理界面启动成功！")
     print(f"📊 访问地址: http://localhost:{PORT}")
-    print(f"⏰ AI决策频率: 每1秒分析一次")
-    print(f"📈 数据更新: 每0.5秒刷新（每秒2次）")
-    print(f"🌐 Web界面: 每1秒自动刷新")
+    print(f"⏰ AI决策频率: 每{config.BACKEND_DECISION_INTERVAL_SECONDS}秒分析一次")
+    print(f"📈 数据更新: 每{config.BACKEND_REALTIME_UPDATE_INTERVAL_SECONDS}秒刷新")
+    print(f"🌐 Web界面: 每{int(config.FRONTEND_REFRESH_INTERVAL_MS)/1000:.3g}秒自动刷新")
     print(f"🛡️  交易间隔: 最少间隔 {deepseekok2.MIN_TRADE_INTERVAL} 秒")
     print(f"📁 模板目录: {app.template_folder}")
     print(f"📁 静态目录: {app.static_folder}")
