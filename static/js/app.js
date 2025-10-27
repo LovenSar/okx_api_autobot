@@ -157,12 +157,16 @@ async function updateDashboard() {
             document.getElementById('unrealizedPnl').textContent = '--';
         }
         
-        // 绩效统计
+        // 绩效统计（总盈亏=已实现+未实现）
         const totalProfitEl = document.getElementById('totalProfit');
-        if (data.performance?.total_profit !== undefined) {
-            totalProfitEl.textContent = `$${data.performance.total_profit.toFixed(2)}`;
-            totalProfitEl.className = `value pnl ${data.performance.total_profit >= 0 ? 'positive' : 'negative'}`;
+        const realized = (typeof data.realized_profit_usdt === 'number') ? data.realized_profit_usdt : 0;
+        let unrealized = 0;
+        if (data.current_position && typeof data.current_position.unrealized_pnl === 'number') {
+            unrealized = data.current_position.unrealized_pnl;
         }
+        const totalPnl = realized + unrealized;
+        totalProfitEl.textContent = `$${totalPnl.toFixed(2)}`;
+        totalProfitEl.className = `value pnl ${totalPnl >= 0 ? 'positive' : 'negative'}`;
         
         document.getElementById('winRate').textContent = 
             data.performance?.win_rate ? `${data.performance.win_rate.toFixed(1)}%` : '--';
@@ -459,7 +463,7 @@ async function updateProfitChart() {
 // 更新AI决策
 async function updateAIDecisions() {
     try {
-        const response = await fetch('/api/ai_decisions');
+        const response = await fetch('/api/ai_decisions?limit=100');
         const data = await response.json();
         
         if (!data || data.length === 0) return;
@@ -485,7 +489,7 @@ async function updateAIDecisions() {
         
         // 显示历史决策
         const historyDiv = document.getElementById('aiHistory');
-        const historyHTML = data.slice(-10).reverse().slice(1).map(decision => `
+        const historyHTML = data.slice(0, Math.max(0, data.length - 1)).reverse().map(decision => `
             <div class="ai-history-item">
                 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
                     <span class="signal-badge ${decision.signal}" style="font-size: 0.8em; padding: 4px 10px;">${decision.signal}</span>
@@ -495,7 +499,12 @@ async function updateAIDecisions() {
             </div>
         `).join('');
         
+        const wasAtBottom = Math.abs(historyDiv.scrollHeight - historyDiv.clientHeight - historyDiv.scrollTop) < 5;
         historyDiv.innerHTML = historyHTML || '<div style="color: #9ca3af; text-align: center; padding: 20px;">暂无历史记录</div>';
+        // 自动滚动到底部（仅在之前已在底部时）
+        if (wasAtBottom) {
+            historyDiv.scrollTop = historyDiv.scrollHeight;
+        }
         
     } catch (error) {
         console.error('AI决策更新失败:', error);

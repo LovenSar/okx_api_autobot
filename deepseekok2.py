@@ -142,8 +142,49 @@ web_data = {
     }
 }
 
+# AI 决策持久化文件（JSONL，每行一个决策）
+AI_DECISIONS_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'ai_decisions.jsonl')
+os.makedirs(os.path.dirname(AI_DECISIONS_LOG_PATH), exist_ok=True)
+
+def append_ai_decision_to_file(decision: dict) -> None:
+    """将AI决策追加写入本地JSONL文件。"""
+    try:
+        with open(AI_DECISIONS_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(decision, ensure_ascii=False) + '\n')
+    except Exception:
+        # 持久化失败不影响主流程
+        pass
+
+# 突破与加仓策略的运行时状态
+last_breakout_ts = 0.0
+last_pyramid_ts = 0.0
+pyramid_adds_long = 0
+pyramid_adds_short = 0
+
+# 已实现盈亏持久化
+REALIZED_PNL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'realized_pnl.json')
+os.makedirs(os.path.dirname(REALIZED_PNL_PATH), exist_ok=True)
+
+def load_realized_pnl() -> None:
+    global realized_profit_usdt
+    try:
+        if os.path.exists(REALIZED_PNL_PATH):
+            with open(REALIZED_PNL_PATH, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                realized_profit_usdt = float(data.get('realized_profit_usdt', 0.0))
+    except Exception:
+        pass
+
+def save_realized_pnl() -> None:
+    try:
+        with open(REALIZED_PNL_PATH, 'w', encoding='utf-8') as f:
+            json.dump({'realized_profit_usdt': realized_profit_usdt}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
 # 初始余额（用于计算收益率）
 initial_balance = None
+realized_profit_usdt = 0.0  # 历史已平仓累计盈亏（USDT）
 ACCOUNT_POS_MODE = None  # 'net' 或 'long_short'
 
 
@@ -659,6 +700,9 @@ def analyze_with_deepseek(price_data):
     2. **持仓稳定性**: 除非趋势明确强烈反转，否则保持现有持仓方向
     3. **反转确认**: 需要至少2-3个技术指标同时确认趋势反转才改变信号
     4. **成本意识**: 减少不必要的仓位调整，每次交易都有成本
+    5. **仓位风险控制（必须考虑）**：单个方向的名义仓位价值不要超过总权益的50%。若连续加仓导致持仓名义价值超过50%，应给出“适当减仓（通常减当前仓位的50%）并锁定部分利润”的建议与理由。
+    6. 若价格快速拉升后出现动能减弱迹象，也需考虑减仓保利润。
+    7. 可以考虑适当的加仓，但不要超过总权益的50%。
 
     【交易指导原则 - 必须遵守】
     1. **技术分析主导** (权重60%)：趋势、支撑阻力、K线形态是主要依据
@@ -790,20 +834,52 @@ def analyze_with_deepseek(price_data):
 
 def execute_trade(signal_data, price_data):
     """执行交易 - OKX版本（增强防频繁交易保护）"""
-    global position, web_data, last_trade_time
+    global position, web_data, last_trade_time, last_breakout_ts, last_pyramid_ts, pyramid_adds_long, pyramid_adds_short, realized_profit_usdt
 
     current_position = get_current_position()
 
-    # ⏰ 检查交易间隔（防止过于频繁交易）
-    if last_trade_time is not None:
+    # 价格突破立即翻转（优先级最高，可绕过反转保护与最小交易间隔，但有独立冷却）
+    breakout_triggered = False
+    try:
+        if int(getattr(config, 'BREAKOUT_ENABLED', 1)) == 1 and price_data.get('levels_analysis'):
+            upper = price_data['levels_analysis'].get('static_resistance')
+            lower = price_data['levels_analysis'].get('static_support')
+            px = float(price_data['price'])
+            now_ts = time.time()
+            if now_ts - last_breakout_ts >= int(getattr(config, 'BREAKOUT_COOLDOWN_SEC', 60)):
+                # 上破
+                if upper and upper > 0:
+                    thresh = upper * (1.0 + float(getattr(config, 'BREAKOUT_UPPER_PCT', 0.003)) / 100.0)
+                    if px >= thresh:
+                        print("🚀 突破上轨触发：立即翻转为多头")
+                        signal_data = dict(signal_data)
+                        signal_data['signal'] = 'BUY'
+                        signal_data['confidence'] = 'HIGH'
+                        breakout_triggered = True
+                # 下破
+                if not breakout_triggered and lower and lower > 0:
+                    thresh = lower * (1.0 - float(getattr(config, 'BREAKOUT_LOWER_PCT', 0.003)) / 100.0)
+                    if px <= thresh:
+                        print("📉 跌破下轨触发：立即翻转为空头")
+                        signal_data = dict(signal_data)
+                        signal_data['signal'] = 'SELL'
+                        signal_data['confidence'] = 'HIGH'
+                        breakout_triggered = True
+                if breakout_triggered:
+                    last_breakout_ts = now_ts
+    except Exception as _:
+        pass
+
+    # ⏰ 检查交易间隔（防止过于频繁交易），若刚发生突破触发则放行
+    if not breakout_triggered and last_trade_time is not None:
         time_since_last_trade = (datetime.now() - last_trade_time).total_seconds()
         if time_since_last_trade < MIN_TRADE_INTERVAL:
             remaining_time = MIN_TRADE_INTERVAL - time_since_last_trade
             print(f"🔒 距上次交易仅 {time_since_last_trade:.0f} 秒，需等待 {remaining_time:.0f} 秒后才能交易")
             return
 
-    # 🔴 防止频繁反转
-    if current_position and signal_data['signal'] != 'HOLD':
+    # 🔴 防止频繁反转（突破触发时可绕过）
+    if not breakout_triggered and current_position and signal_data['signal'] != 'HOLD':
         current_side = current_position['side']
         # 修正：正确处理HOLD情况
         if signal_data['signal'] == 'BUY':
@@ -819,12 +895,13 @@ def execute_trade(signal_data, price_data):
                 print(f"🔒 非高信心反转信号，保持现有{current_side}仓")
                 return
 
-            # 检查最近信号历史，避免频繁反转
-            if len(signal_history) >= 2:
-                last_signals = [s['signal'] for s in signal_history[-2:]]
-                if signal_data['signal'] in last_signals:
-                    print(f"🔒 近期已出现{signal_data['signal']}信号，避免频繁反转")
-                    return
+            # 新逻辑：要求连续出现N次（含当前）同向信号才允许反转
+            required = int(getattr(config, 'REVERSAL_CONFIRMATION_COUNT', 3))
+            recent = [s['signal'] for s in signal_history[-(required-1):]] if required > 1 else []
+            all_same = all(sig == signal_data['signal'] for sig in recent) if recent else True
+            if not all_same:
+                print(f"🔒 反转保护：未达到连续{required}次{signal_data['signal']}确认（当前仅{len(recent)+1}次），暂不反转")
+                return
 
     print(f"交易信号: {signal_data['signal']}")
     print(f"信心程度: {signal_data['confidence']}")
@@ -833,7 +910,7 @@ def execute_trade(signal_data, price_data):
     print(f"止盈: ${signal_data['take_profit']:,.2f}")
     print(f"当前持仓: {current_position}")
 
-    # 风险管理：低信心信号不执行
+    # 风险管理：低信心信号不执行（突破触发已强制HIGH）
     if signal_data['confidence'] == 'LOW' and not TRADE_CONFIG['test_mode']:
         print("⚠️ 低信心信号，跳过执行")
         return
@@ -855,7 +932,8 @@ def execute_trade(signal_data, price_data):
             usdt_balance = balance['USDT']['free']
 
         # 计算下单张数与保证金需求
-        desired_contracts = btc_amount_to_okx_contracts(TRADE_CONFIG['amount'])
+        base_amount_btc = TRADE_CONFIG['amount']
+        desired_contracts = btc_amount_to_okx_contracts(base_amount_btc)
         mark_price = price_data['price']  # 近似用当前价，最好可调用ticker.markPx
         required_margin = estimate_required_margin_usdt(desired_contracts, mark_price, TRADE_CONFIG['leverage'])
 
@@ -880,6 +958,16 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
+                # 记录平仓前的入场价与方向，用于计算已实现盈亏
+                try:
+                    entry = float(current_position.get('entry_price') or 0)
+                    size_contracts = float(current_position.get('size') or 0)
+                    ct_size_btc = get_contract_size_btc()
+                    close_price = mark_price
+                    # 空头平仓已实现 = (入场价 - 平仓价) * 张数*合约面值
+                    realized = (entry - close_price) * size_contracts * ct_size_btc
+                except Exception:
+                    realized = 0.0
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=current_position['size'], params=params)
                 time.sleep(1)
                 # 开多仓（将BTC数量换算为合约张数下单）
@@ -888,7 +976,38 @@ def execute_trade(signal_data, price_data):
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=params)
+                # 累计已实现盈亏
+                realized_profit_usdt += realized
+                save_realized_pnl()
             elif current_position and current_position['side'] == 'long':
+                # 同向加仓（连涨加仓）
+                try:
+                    if int(getattr(config, 'PYRAMID_ENABLED', 1)) == 1:
+                        now_ts = time.time()
+                        if now_ts - last_pyramid_ts >= int(getattr(config, 'PYRAMID_MIN_INTERVAL_SEC', 60)) and pyramid_adds_long < int(getattr(config, 'PYRAMID_MAX_ADDS', 3)):
+                            required = int(getattr(config, 'PYRAMID_CONSEC_SIGNALS_FOR_ADD', 2))
+                            recent = [s['signal'] for s in signal_history[-(required-1):]] if required > 1 else []
+                            if all(sig == 'BUY' for sig in recent):
+                                add_ratio = float(getattr(config, 'PYRAMID_ADD_RATIO', 0.5))
+                                add_amount_btc = max(0.0, base_amount_btc * add_ratio)
+                                if add_amount_btc > 0:
+                                    print(f"➕ 连涨加仓BUY，比例{add_ratio:.2f}，下单BTC={add_amount_btc}")
+                                    add_contracts = btc_amount_to_okx_contracts(add_amount_btc)
+                                    params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                                    if ACCOUNT_POS_MODE == 'long_short':
+                                        params['posSide'] = 'long'
+                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=add_contracts, params=params)
+                                    pyramid_adds_long += 1
+                                    last_pyramid_ts = now_ts
+                                    print(f"连涨加仓完成，累计加仓次数(long)={pyramid_adds_long}")
+                                else:
+                                    print("连涨加仓比例为0，跳过")
+                            else:
+                                print("未满足连涨加仓的连续BUY次数要求，跳过")
+                        else:
+                            print("连涨加仓冷却中或达到上限，跳过")
+                except Exception as _:
+                    pass
                 print("已有多头持仓，保持现状")
             else:
                 # 无持仓时开多仓
@@ -906,6 +1025,16 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
+                # 记录平仓前的入场价与方向，用于计算已实现盈亏
+                try:
+                    entry = float(current_position.get('entry_price') or 0)
+                    size_contracts = float(current_position.get('size') or 0)
+                    ct_size_btc = get_contract_size_btc()
+                    close_price = mark_price
+                    # 多头平仓已实现 = (平仓价 - 入场价) * 张数*合约面值
+                    realized = (close_price - entry) * size_contracts * ct_size_btc
+                except Exception:
+                    realized = 0.0
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=current_position['size'], params=params)
                 time.sleep(1)
                 # 开空仓（将BTC数量换算为合约张数下单）
@@ -914,7 +1043,38 @@ def execute_trade(signal_data, price_data):
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=params)
+                # 累计已实现盈亏
+                realized_profit_usdt += realized
+                save_realized_pnl()
             elif current_position and current_position['side'] == 'short':
+                # 同向加仓（连跌加仓）
+                try:
+                    if int(getattr(config, 'PYRAMID_ENABLED', 1)) == 1:
+                        now_ts = time.time()
+                        if now_ts - last_pyramid_ts >= int(getattr(config, 'PYRAMID_MIN_INTERVAL_SEC', 60)) and pyramid_adds_short < int(getattr(config, 'PYRAMID_MAX_ADDS', 3)):
+                            required = int(getattr(config, 'PYRAMID_CONSEC_SIGNALS_FOR_ADD', 2))
+                            recent = [s['signal'] for s in signal_history[-(required-1):]] if required > 1 else []
+                            if all(sig == 'SELL' for sig in recent):
+                                add_ratio = float(getattr(config, 'PYRAMID_ADD_RATIO', 0.5))
+                                add_amount_btc = max(0.0, base_amount_btc * add_ratio)
+                                if add_amount_btc > 0:
+                                    print(f"➕ 连跌加仓SELL，比例{add_ratio:.2f}，下单BTC={add_amount_btc}")
+                                    add_contracts = btc_amount_to_okx_contracts(add_amount_btc)
+                                    params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
+                                    if ACCOUNT_POS_MODE == 'long_short':
+                                        params['posSide'] = 'short'
+                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=add_contracts, params=params)
+                                    pyramid_adds_short += 1
+                                    last_pyramid_ts = now_ts
+                                    print(f"连跌加仓完成，累计加仓次数(short)={pyramid_adds_short}")
+                                else:
+                                    print("连跌加仓比例为0，跳过")
+                            else:
+                                print("未满足连跌加仓的连续SELL次数要求，跳过")
+                        else:
+                            print("连跌加仓冷却中或达到上限，跳过")
+                except Exception as _:
+                    pass
                 print("已有空头持仓，保持现状")
             else:
                 # 无持仓时开空仓
@@ -1122,7 +1282,8 @@ def trading_bot():
         # 记录收益曲线数据
         current_position = get_current_position()
         unrealized_pnl = current_position.get('unrealized_pnl', 0) if current_position else 0
-        total_profit = current_equity - initial_balance
+        # 总盈亏 = 历史已实现盈亏 + 当前未实现盈亏
+        total_profit = realized_profit_usdt + unrealized_pnl
         profit_rate = (total_profit / initial_balance * 100) if initial_balance > 0 else 0
         
         profit_point = {
@@ -1159,12 +1320,16 @@ def trading_bot():
         'price': price_data['price']
     }
     web_data['ai_decisions'].append(ai_decision)
-    if len(web_data['ai_decisions']) > 50:  # 只保留最近50条
-        web_data['ai_decisions'].pop(0)
+    # 持久化到文件（无限累积）
+    append_ai_decision_to_file(ai_decision)
     
     # 更新性能统计
-    if web_data['current_position']:
-        web_data['performance']['total_profit'] = web_data['current_position'].get('unrealized_pnl', 0)
+    try:
+        current_position = web_data.get('current_position')
+        unrealized_pnl = current_position.get('unrealized_pnl', 0) if current_position else 0
+        web_data['performance']['total_profit'] = realized_profit_usdt + unrealized_pnl
+    except Exception:
+        pass
 
     # 4. 执行交易
     execute_trade(signal_data, price_data)
@@ -1183,6 +1348,9 @@ def main():
 
     print(f"交易周期: {TRADE_CONFIG['timeframe']}")
     print("已启用完整技术指标分析和持仓跟踪功能")
+
+    # 读取历史已实现盈亏
+    load_realized_pnl()
 
     # 设置交易所
     if not setup_exchange():

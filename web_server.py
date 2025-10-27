@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
 import threading
 import sys
@@ -9,6 +9,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 导入主程序
 import deepseekok2
+import json
 import config
 
 # 明确指定模板和静态文件路径
@@ -35,6 +36,7 @@ def get_dashboard_data():
             'current_price': deepseekok2.web_data['current_price'],
             'last_update': deepseekok2.web_data['last_update'],
             'performance': deepseekok2.web_data['performance'],
+            'realized_profit_usdt': getattr(deepseekok2, 'realized_profit_usdt', 0.0),
             'config': {
                 'symbol': deepseekok2.TRADE_CONFIG['symbol'],
                 'leverage': deepseekok2.TRADE_CONFIG['leverage'],
@@ -66,7 +68,61 @@ def get_trade_history():
 def get_ai_decisions():
     """获取AI决策历史"""
     try:
-        return jsonify(deepseekok2.web_data['ai_decisions'])
+        # 支持通过文件尾部读取，limit 指定条数，默认100
+        limit = request.args.get('limit', default=100, type=int)
+        limit = max(1, min(limit, 10000))
+
+        # 先尝试从JSONL文件读取
+        log_path = getattr(deepseekok2, 'AI_DECISIONS_LOG_PATH', None)
+        decisions = []
+
+        if log_path and os.path.exists(log_path):
+            try:
+                # 高效尾部读取：从文件末尾向前读取直到满足limit
+                with open(log_path, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    buffer = bytearray()
+                    lines = []
+                    block_size = 4096
+                    pos = file_size
+                    while pos > 0 and len(lines) <= limit:
+                        read_size = block_size if pos >= block_size else pos
+                        pos -= read_size
+                        f.seek(pos)
+                        chunk = f.read(read_size)
+                        buffer[0:0] = chunk
+                        # 按行切分
+                        while True:
+                            newline_index = buffer.rfind(b'\n')
+                            if newline_index == -1:
+                                break
+                            line = buffer[newline_index+1:]
+                            buffer = buffer[:newline_index]
+                            if line.strip():
+                                lines.append(line)
+                            if len(lines) >= limit:
+                                break
+                    # 剩余缓冲作为第一行
+                    if len(lines) < limit and buffer.strip():
+                        lines.append(buffer)
+
+                # 反转为时间正序
+                lines = list(reversed(lines))
+                for b in lines:
+                    try:
+                        decisions.append(json.loads(b.decode('utf-8')))
+                    except Exception:
+                        continue
+            except Exception:
+                decisions = []
+
+        # 如果文件没有或失败，回退到内存数据
+        if not decisions:
+            data = deepseekok2.web_data['ai_decisions']
+            decisions = data[-limit:]
+
+        return jsonify(decisions)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
