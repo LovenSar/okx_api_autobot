@@ -65,22 +65,22 @@ price_history = []
 signal_history = []
 position = None
 last_trade_time = None  # 记录上次交易时间
-MIN_TRADE_INTERVAL = 300  # 最小交易间隔（秒），防止过于频繁交易
+MIN_TRADE_INTERVAL = 120  # 最小交易间隔（秒），防止过于频繁交易
 
 # 私有接口（余额/持仓）更新节流，避免频繁调用导致限流
-PRIVATE_UPDATE_INTERVAL = 5  # 秒，仅每5秒刷新一次余额和持仓
+PRIVATE_UPDATE_INTERVAL = 1  # 秒，仅每5秒刷新一次余额和持仓
 last_private_update_ts = 0.0
 
 # 技术分析/情绪数据缓存，降低外部与公共接口压力
-ANALYSIS_UPDATE_INTERVAL = 15  # 秒，整套技术指标刷新间隔
+ANALYSIS_UPDATE_INTERVAL = 60  # 秒，整套技术指标刷新间隔
 last_analysis_ts = 0.0
 last_price_data_cache = None
 
-SENTIMENT_TTL = 300  # 秒，情绪数据缓存时间
+SENTIMENT_TTL = 30  # 秒，情绪数据缓存时间
 _sentiment_cache = { 'ts': 0.0, 'data': None }
 
 # AI 决策节流与缓存，降低DeepSeek调用频率，减少超时
-AI_DECISION_INTERVAL = 15  # 秒，最小AI调用间隔
+AI_DECISION_INTERVAL = 120  # 秒，最小AI调用间隔
 last_ai_call_ts = 0.0
 last_ai_decision_cache = None
 ai_backoff_until_ts = 0.0  # 出现超时后退避一段时间
