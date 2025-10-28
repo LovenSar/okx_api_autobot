@@ -325,6 +325,7 @@ body {
     grid-template-columns: 1fr 1fr;
     gap: 20px;
     margin-bottom: 30px;
+    align-items: stretch; /* 让两侧卡片等高 */
 }
 
 /* AI决策卡片 */
@@ -430,18 +431,19 @@ body {
 .trades-card {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    height: 100%; /* 填满网格单元，与右侧AI卡片等高 */
+    align-self: stretch; /* 与grid对齐策略一致 */
 }
 .trades-card .card-body {
-    flex: 1;
+    flex: 1; /* 占满卡片剩余高度 */
     display: flex;
     flex-direction: column;
-    min-height: 0; /* 允许子元素在flex容器内正确收缩以启用滚动 */
+    min-height: 0; /* 允许内部滚动区域正确收缩 */
 }
 .trades-card .trades-table {
-    flex: 1;
+    flex: 1; /* 滚轮区域尽可能大 */
     overflow: auto; /* 同时支持纵向滚动 */
-    max-height: none; /* 覆盖全局的固定高度限制 */
+    max-height: none; /* 由父容器高度决定 */
 }
 
 table {
