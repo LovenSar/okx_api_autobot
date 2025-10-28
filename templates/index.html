@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>BTC自动交易机器人 - 实时监控面板</title>
+    <title>OKX自动交易机器人 - 实时监控面板</title>
     <link rel="stylesheet" href="/static/css/style.css">
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -14,7 +14,7 @@
         <header class="header">
             <div class="header-left">
                 <i class="fas fa-robot"></i>
-                <h1>BTC自动交易机器人</h1>
+                <h1>OKX自动交易机器人</h1>
                 <span class="status-badge" id="statusBadge">运行中</span>
             </div>
             <div class="header-center">
@@ -65,7 +65,7 @@
             <div class="card price-card">
                 <div class="card-header">
                     <i class="fab fa-bitcoin"></i>
-                    <h3>BTC/USDT</h3>
+                    <h3 id="symbolHeader">--</h3>
                 </div>
                 <div class="card-body">
                     <div class="price-display">
@@ -125,6 +125,40 @@
                     <div class="info-item">
                         <span class="label">总交易次数</span>
                         <span class="value" id="totalTrades">--</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 多合约持仓管理 -->
+        <div class="stats-section">
+            <div class="card">
+                <div class="card-header">
+                    <i class="fas fa-layer-group"></i>
+                    <h3>多合约持仓管理</h3>
+                </div>
+                <div class="card-body">
+                    <div class="trades-table">
+                        <table id="multiOverviewTable">
+                            <thead>
+                                <tr>
+                                    <th>交易对</th>
+                                    <th>当前价</th>
+                                    <th>持仓</th>
+                                    <th>数量(张)</th>
+                                    <th>入场价</th>
+                                    <th>未实现盈亏(USDT)</th>
+                                    <th>止盈</th>
+                                    <th>止损</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody id="multiOverviewBody">
+                                <tr>
+                                    <td colspan="9" class="no-data">加载中...</td>
+                                </tr>
+                            </tbody>
+                        </table>
                     </div>
                 </div>
             </div>

@@ -7,15 +7,18 @@ let confidenceChart = null;
 document.addEventListener('DOMContentLoaded', async function() {
     initCharts();
     updateData();
+    updateMultiOverview();
     try {
         const cfgResp = await fetch('/api/config');
         const cfg = await cfgResp.json();
         const intervalMs = (cfg && cfg.frontend_refresh_interval_ms) ? cfg.frontend_refresh_interval_ms : 1000;
         // 每配置的间隔更新一次数据（实时显示价格和持仓）
         setInterval(updateData, intervalMs);
+        setInterval(updateMultiOverview, Math.max(2000, intervalMs * 2));
     } catch (e) {
         // 回退到1秒
         setInterval(updateData, 1000);
+        setInterval(updateMultiOverview, 2000);
     }
 });
 
@@ -49,6 +52,9 @@ async function updateData() {
         
         // 更新收益曲线图
         await updateProfitChart();
+
+        // 更新聚合绩效(历史+当前)
+        await updatePerformanceAggregate();
         
         // 更新AI决策
         await updateAIDecisions();
@@ -61,6 +67,27 @@ async function updateData() {
         
     } catch (error) {
         console.error('数据更新失败:', error);
+    }
+}
+async function updatePerformanceAggregate() {
+    try {
+        const resp = await fetch('/api/performance');
+        const perf = await resp.json();
+        const totalProfitEl = document.getElementById('totalProfit');
+        if (totalProfitEl && typeof perf.realized_profit_usdt === 'number') {
+            // 这里沿用“总盈亏=已实现+未实现”的展示，未实现由 dashboard 已显示；此处强调已实现部分
+            totalProfitEl.title = `已实现盈亏(历史): $${perf.realized_profit_usdt.toFixed(2)}`;
+        }
+        const winRateEl = document.getElementById('winRate');
+        if (winRateEl && typeof perf.win_rate === 'number') {
+            winRateEl.textContent = `${perf.win_rate.toFixed(1)}%`;
+        }
+        const totalTradesEl = document.getElementById('totalTrades');
+        if (totalTradesEl && typeof perf.total_trades === 'number') {
+            totalTradesEl.textContent = String(perf.total_trades);
+        }
+    } catch (e) {
+        console.error('聚合绩效更新失败:', e);
     }
 }
 
@@ -135,6 +162,10 @@ async function updateDashboard() {
             data.config?.timeframe || '--';
         document.getElementById('tradeMode').textContent = 
             data.config?.test_mode ? '模拟模式' : '实盘模式';
+        // 头部 symbol
+        const sym = data.config?.symbol || '--';
+        const head = document.getElementById('symbolHeader');
+        if (head) head.textContent = sym;
         
         // 当前价格
         if (data.current_price) {
@@ -149,7 +180,7 @@ async function updateDashboard() {
             posType.textContent = pos.side === 'long' ? '多头持仓' : '空头持仓';
             posType.className = `position-type ${pos.side}`;
             
-            document.getElementById('positionSize').textContent = `${pos.size} BTC`;
+            document.getElementById('positionSize').textContent = `${pos.size} 张`;
             document.getElementById('entryPrice').textContent = `$${pos.entry_price.toFixed(2)}`;
             
             const pnlElement = document.getElementById('unrealizedPnl');
@@ -532,10 +563,10 @@ async function updateTrades() {
         
         const rows = data.slice(-20).reverse().map(trade => `
             <tr>
-                <td>${trade.timestamp}</td>
+                <td>${trade.timestamp}${trade.symbol ? ` • ${trade.symbol}` : ''}</td>
                 <td><span class="signal-badge ${trade.signal}" style="font-size: 0.8em; padding: 4px 10px;">${trade.signal}</span></td>
                 <td>$${trade.price.toFixed(2)}</td>
-                <td>${trade.amount} BTC</td>
+                <td>${trade.amount} ${trade.base || ''}</td>
                 <td><span class="confidence-badge ${trade.confidence}" style="font-size: 0.75em; padding: 3px 8px;">${trade.confidence}</span></td>
                 <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${trade.reason}">${trade.reason}</td>
             </tr>
@@ -547,6 +578,81 @@ async function updateTrades() {
         console.error('交易记录更新失败:', error);
     }
 }
+// 多交易对总览与操作
+async function updateMultiOverview() {
+    try {
+        const resp = await fetch('/api/multi/overview');
+        const json = await resp.json();
+        const tbody = document.getElementById('multiOverviewBody');
+        if (!tbody) return;
+        const items = json?.items || [];
+        if (!items.length) {
+            tbody.innerHTML = '<tr><td colspan="9" class="no-data">暂无数据</td></tr>';
+            return;
+        }
+        const rows = items.map(it => {
+            const pos = it.position;
+            const sideText = pos ? (pos.side === 'long' ? '多头' : '空头') : '无';
+            const sizeText = pos?.size || '--';
+            const entryText = pos?.entry_price ? `$${Number(pos.entry_price).toFixed(2)}` : '--';
+            const pnlText = pos?.unrealized_pnl !== undefined ? `$${Number(pos.unrealized_pnl).toFixed(2)}` : '--';
+            const tpDefault = (it.tpsl_expected && it.tpsl_expected.tp != null) ? it.tpsl_expected.tp : '';
+            const slDefault = (it.tpsl_expected && it.tpsl_expected.sl != null) ? it.tpsl_expected.sl : '';
+            return `
+            <tr>
+                <td>${it.symbol}</td>
+                <td>${it.price ? `$${Number(it.price).toFixed(2)}` : '--'}</td>
+                <td>${sideText}</td>
+                <td>${sizeText}</td>
+                <td>${entryText}</td>
+                <td>${pnlText}</td>
+                <td>
+                    <input type="number" step="0.01" placeholder="TP" style="width: 90px;" data-tp-for="${it.symbol}" value="${tpDefault}">
+                </td>
+                <td>
+                    <input type="number" step="0.01" placeholder="SL" style="width: 90px;" data-sl-for="${it.symbol}" value="${slDefault}">
+                </td>
+                <td>
+                    <button onclick="submitTPSL('${it.symbol}')">设置TP/SL</button>
+                    <button onclick="closePosition('${it.symbol}')">平仓</button>
+                </td>
+            </tr>`;
+        }).join('');
+        tbody.innerHTML = rows;
+    } catch (e) {
+        console.error('多合约总览更新失败:', e);
+    }
+}
+
+async function submitTPSL(symbol) {
+    try {
+        const tpInput = document.querySelector(`input[data-tp-for="${symbol}"]`);
+        const slInput = document.querySelector(`input[data-sl-for="${symbol}"]`);
+        const body = {
+            symbol,
+            take_profit: tpInput && tpInput.value ? Number(tpInput.value) : null,
+            stop_loss: slInput && slInput.value ? Number(slInput.value) : null
+        };
+        const resp = await fetch('/api/position/tpsl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+        const json = await resp.json();
+        if (!json.ok) throw new Error(json.error || '设置失败');
+        alert('已提交TP/SL设置');
+    } catch (e) {
+        alert('设置失败: ' + e.message);
+    }
+}
+
+async function closePosition(symbol) {
+    try {
+        const resp = await fetch('/api/position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol }) });
+        const json = await resp.json();
+        if (!json.ok) throw new Error(json.error || '平仓失败');
+        alert('已提交平仓订单');
+    } catch (e) {
+        alert('平仓失败: ' + e.message);
+    }
+}
+
 
 // 更新信号统计
 async function updateSignalStats() {

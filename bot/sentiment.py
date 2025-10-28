@@ -25,13 +25,19 @@ def get_sentiment_indicators():
         end_time = datetime.now()
         start_time = end_time - timedelta(hours=4)
 
+        # 动态选择情绪代币（基础币种）
+        try:
+            base_token = str(TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')).split('/')[0].upper()
+        except Exception:
+            base_token = 'BTC'
+
         request_body = {
             "apiKey": API_KEY,
             "endpoints": ["CO-A-02-01", "CO-A-02-02"],
             "startTime": start_time.strftime("%Y-%m-%d %H:%M:%S"),
             "endTime": end_time.strftime("%Y-%m-%d %H:%M:%S"),
             "timeType": TRADE_CONFIG['timeframe'],
-            "token": ["BTC"]
+            "token": [base_token]
         }
 
         headers = {"Content-Type": "application/json", "X-API-KEY": API_KEY}

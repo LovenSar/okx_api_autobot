@@ -177,6 +177,13 @@ def get_btc_ohlcv_enhanced():
         trend_analysis = get_market_trend(df)
         levels_analysis = get_support_resistance_levels(df)
 
+        try:
+            symbol = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
+            base = symbol.split('/')[0]
+        except Exception:
+            symbol = 'BTC/USDT:USDT'
+            base = 'BTC'
+
         result = {
             'price': current_data['close'],
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -184,6 +191,8 @@ def get_btc_ohlcv_enhanced():
             'low': current_data['low'],
             'volume': current_data['volume'],
             'timeframe': TRADE_CONFIG['timeframe'],
+            'symbol': symbol,
+            'base': base,
             'price_change': ((current_data['close'] - previous_data['close']) / previous_data['close']) * 100,
             'kline_data': df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records'),
             'technical_data': {

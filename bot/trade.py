@@ -18,7 +18,8 @@ from .okx import (
     get_contract_size_btc,
 )
 from .context import exchange
-from .utils import update_win_statistics, save_realized_pnl
+from .state import set_symbol_tpsl_expected
+from .utils import update_win_statistics, save_realized_pnl, append_trade_to_file
 
 
 def execute_trade(signal_data, price_data):
@@ -61,32 +62,7 @@ def execute_trade(signal_data, price_data):
     except Exception:
         pass
 
-    if not breakout_triggered:
-        try:
-            recent_signals = state.signal_history[-3:]
-            if recent_signals:
-                count_buy = sum(1 for s in recent_signals if s.get('signal') == 'BUY')
-                count_sell = sum(1 for s in recent_signals if s.get('signal') == 'SELL')
-                dominant = None
-                if count_buy >= 2 and count_sell == 0:
-                    dominant = 'BUY'
-                elif count_sell >= 2 and count_buy == 0:
-                    dominant = 'SELL'
-                if dominant is not None:
-                    target = 'SELL' if dominant == 'BUY' else 'BUY'
-                    if signal_data.get('signal') != target:
-                        print(f"⚖️ 极端偏向触发：最近3次中{dominant}≥2且无{'SELL' if dominant=='BUY' else 'BUY'} → 翻转为{target}（强制HIGH）")
-                        signal_data = dict(signal_data)
-                        signal_data['signal'] = target
-                        signal_data['confidence'] = 'HIGH'
-                        try:
-                            original_reason = str(signal_data.get('reason', '') or '')
-                            dom_count = count_buy if dominant == 'BUY' else count_sell
-                            signal_data['reason'] = f"{original_reason} | 极端偏向翻转: 最近3次{dominant}={dom_count}, 反向尝试{target}"
-                        except Exception:
-                            pass
-        except Exception:
-            pass
+    # 移除“极端偏向翻转”逻辑：完全尊重AI原始信号
 
     try:
         if signal_data.get('signal') == 'HOLD':
@@ -169,6 +145,10 @@ def execute_trade(signal_data, price_data):
     print(f"止损: {sl_str}")
     print(f"止盈: {tp_str}")
     print(f"当前持仓: {current_position}")
+    try:
+        set_symbol_tpsl_expected(TRADE_CONFIG.get('symbol'), tp_val, sl_val)
+    except Exception:
+        pass
 
     if signal_data['confidence'] == 'LOW' and not TRADE_CONFIG['test_mode']:
         print("⚠️ 低信心信号，跳过执行")
@@ -207,29 +187,17 @@ def execute_trade(signal_data, price_data):
             print(f"⚠️ 保证金不足，自动将下单张数从 {desired_contracts} 调整为 {max_contracts}")
             desired_contracts = max_contracts
 
-        from .okx import prepare_tp_sl_params_for_order
+        # 开仓单不再附带TP/SL，避免OKX对 ordType 的参数冲突（51000）。
+        # 若AI提供TP/SL，将在下单后通过策略委托单独设置。
         try:
             tp_input = signal_data.get('take_profit')
             sl_input = signal_data.get('stop_loss')
             if tp_input is None and sl_input is None:
-                tp_sl_params = {}
-                print("未设置TP/SL（AI显式返回None，按规则不下发TP/SL）")
+                print("未设置TP/SL（AI显式返回None，按规则不设置）")
             else:
-                try:
-                    tp_sl_params = prepare_tp_sl_params_for_order(
-                        signal_data.get('signal'),
-                        price_data.get('price'),
-                        tp_input,
-                        sl_input
-                    )
-                except Exception:
-                    tp_sl_params = {}
-            if tp_sl_params:
-                print(f"将附带TP/SL参数: {tp_sl_params}")
-            else:
-                print("未附带TP/SL参数（未提供或解析失败）")
+                print("TP/SL 将在下单后以策略委托形式单独设置")
         except Exception:
-            tp_sl_params = {}
+            pass
 
         if signal_data['signal'] == 'BUY':
             if current_position and current_position['side'] == 'short':
@@ -257,11 +225,7 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
-                try:
-                    p2 = dict(params)
-                    p2.update(tp_sl_params)
-                except Exception:
-                    p2 = params
+                p2 = params
                 open_px = compute_aggressive_limit_price('buy', mark_price)
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px, params=p2)
                 state.realized_profit_usdt += realized
@@ -286,11 +250,7 @@ def execute_trade(signal_data, price_data):
                                     params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                                     if state.ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'long'
-                                    try:
-                                        p3 = dict(params)
-                                        p3.update(tp_sl_params)
-                                    except Exception:
-                                        p3 = params
+                                    p3 = params
                                     add_px = compute_aggressive_limit_price('buy', mark_price)
                                     exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=add_contracts, price=add_px, params=p3)
                                     state.pyramid_adds_long += 1
@@ -315,11 +275,7 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
-                try:
-                    p1 = dict(params)
-                    p1.update(tp_sl_params)
-                except Exception:
-                    p1 = params
+                p1 = params
                 open_px2 = compute_aggressive_limit_price('buy', mark_price)
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px2, params=p1)
                 try:
@@ -353,11 +309,7 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
-                try:
-                    p4 = dict(params)
-                    p4.update(tp_sl_params)
-                except Exception:
-                    p4 = params
+                p4 = params
                 open_px = compute_aggressive_limit_price('sell', mark_price)
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px, params=p4)
                 state.realized_profit_usdt += realized
@@ -382,11 +334,7 @@ def execute_trade(signal_data, price_data):
                                     params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                                     if state.ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'short'
-                                    try:
-                                        p5 = dict(params)
-                                        p5.update(tp_sl_params)
-                                    except Exception:
-                                        p5 = params
+                                    p5 = params
                                     add_px = compute_aggressive_limit_price('sell', mark_price)
                                     exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=add_contracts, price=add_px, params=p5)
                                     state.pyramid_adds_short += 1
@@ -411,11 +359,7 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
-                try:
-                    p6 = dict(params)
-                    p6.update(tp_sl_params)
-                except Exception:
-                    p6 = params
+                p6 = params
                 open_px3 = compute_aggressive_limit_price('sell', mark_price)
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px3, params=p6)
                 try:
@@ -441,6 +385,19 @@ def execute_trade(signal_data, price_data):
                 side_check = 'sell' if refreshed_position['side'] == 'long' else 'buy'
             expected_tp = _parse_price_value(signal_data.get('take_profit'))
             expected_sl = _parse_price_value(signal_data.get('stop_loss'))
+            # 若AI提供了TP/SL，下单后单独设置策略委托
+            if expected_tp is not None or expected_sl is not None:
+                try:
+                    set_ok = set_position_tp_sl_for_okx(expected_tp, expected_sl, refreshed_position.get('side') if refreshed_position else None)
+                    if set_ok:
+                        print(f"已提交策略委托TP/SL设置: TP={expected_tp} SL={expected_sl}")
+                        time.sleep(1)
+                except Exception as _e:
+                    print(f"设置策略委托TP/SL失败: {_e}")
+            try:
+                set_symbol_tpsl_expected(TRADE_CONFIG.get('symbol'), expected_tp, expected_sl)
+            except Exception:
+                pass
             verify = verify_tp_sl_against_pending(expected_tp, expected_sl, side_check)
             print(f"下单后挂单核对: TP一致={verify.get('tp_match')} SL一致={verify.get('sl_match')}")
             dedup = deduplicate_pending_tpsl(side_check)
@@ -468,17 +425,30 @@ def execute_trade(signal_data, price_data):
         except Exception:
             amount_btc = 0.0
 
+        try:
+            _sym = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
+            _base = _sym.split('/')[0]
+        except Exception:
+            _sym = 'BTC/USDT:USDT'
+            _base = 'BTC'
+
         trade_record = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': _sym,
             'signal': signal_data['signal'],
             'price': price_data['price'],
             'amount': amount_btc,
+            'base': _base,
             'confidence': signal_data['confidence'],
             'reason': signal_data['reason']
         }
         state.web_data['trade_history'].append(trade_record)
         if len(state.web_data['trade_history']) > 100:
             state.web_data['trade_history'].pop(0)
+        try:
+            append_trade_to_file(trade_record)
+        except Exception:
+            pass
 
     except Exception as e:
         print(f"订单执行失败: {e}")

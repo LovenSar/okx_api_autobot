@@ -13,6 +13,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 import deepseekok2
 import json
 import config
+from bot import state as bot_state
+from bot.utils import TRADES_LOG_PATH
 
 # 明确指定模板和静态文件路径
 app = Flask(__name__, 
@@ -53,6 +55,7 @@ def get_dashboard_data():
             'realized_profit_usdt': getattr(deepseekok2, 'realized_profit_usdt', 0.0),
             'config': {
                 'symbol': deepseekok2.TRADE_CONFIG['symbol'],
+                'symbols': deepseekok2.TRADE_CONFIG.get('symbols', [deepseekok2.TRADE_CONFIG['symbol']]),
                 'leverage': deepseekok2.TRADE_CONFIG['leverage'],
                 'timeframe': deepseekok2.TRADE_CONFIG['timeframe'],
                 'test_mode': deepseekok2.TRADE_CONFIG['test_mode']
@@ -173,6 +176,44 @@ def get_profit_curve():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+@app.route('/api/performance')
+def get_performance_aggregate():
+    try:
+        total_trades = 0
+        wins = 0
+        losses = 0
+        realized = float(getattr(deepseekok2, 'realized_profit_usdt', 0.0))
+        # 读取 trades.jsonl 聚合历史（如存在）
+        try:
+            if os.path.exists(TRADES_LOG_PATH):
+                with open(TRADES_LOG_PATH, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            obj = json.loads(line)
+                            total_trades += 1 if obj.get('signal') in ('BUY','SELL') else 0
+                        except Exception:
+                            continue
+        except Exception:
+            pass
+        perf = bot_state.web_data.get('performance', {})
+        wins = int(perf.get('wins', 0))
+        losses = int(perf.get('losses', 0))
+        equity = None
+        try:
+            equity = bot_state.web_data.get('account_info', {}).get('total_equity')
+        except Exception:
+            equity = None
+        return jsonify({
+            'realized_profit_usdt': realized,
+            'total_trades': total_trades,
+            'wins': wins,
+            'losses': losses,
+            'win_rate': (wins / (wins + losses) * 100.0) if (wins + losses) > 0 else 0,
+            'equity': equity,
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/ai_model_info')
 def get_ai_model_info():
     """获取AI模型信息和连接状态"""
@@ -194,6 +235,138 @@ def get_runtime_config():
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/symbols')
+def list_symbols():
+    try:
+        return jsonify({'symbols': deepseekok2.TRADE_CONFIG.get('symbols', [deepseekok2.TRADE_CONFIG['symbol']])})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/multi/overview')
+def multi_overview():
+    try:
+        from bot.state import ensure_symbol_bucket
+        results = []
+        for sym in deepseekok2.TRADE_CONFIG.get('symbols', [deepseekok2.TRADE_CONFIG['symbol']]):
+            try:
+                bucket = ensure_symbol_bucket(sym)
+            except Exception:
+                bucket = {}
+            price = None
+            try:
+                if bucket and bucket.get('last_price_data_cache'):
+                    price = bucket['last_price_data_cache'].get('price')
+            except Exception:
+                price = None
+            if price is None:
+                try:
+                    ohlcv = deepseekok2.exchange.fetch_ohlcv(sym, deepseekok2.TRADE_CONFIG['timeframe'], limit=1)
+                    if ohlcv and len(ohlcv) > 0:
+                        price = ohlcv[0][4]
+                except Exception:
+                    price = None
+            position = None
+            try:
+                # 读取缓存，若超过节流间隔再尝试刷新
+                pos_cached = bucket.get('last_position')
+                pos_ts = float(bucket.get('last_position_ts') or 0)
+                import time as _t
+                should_refresh = (_t.time() - pos_ts) >= float(config.PRIVATE_UPDATE_INTERVAL_SECONDS)
+                if pos_cached and not should_refresh:
+                    position = pos_cached
+                else:
+                    positions = deepseekok2.exchange.fetch_positions([sym])
+                    for pos in positions:
+                        if pos.get('symbol') == sym and float(pos.get('contracts') or 0) > 0:
+                            position = {
+                                'side': pos.get('side'),
+                                'size': float(pos.get('contracts')),
+                                'entry_price': float(pos.get('entryPrice') or 0),
+                                'unrealized_pnl': float(pos.get('unrealizedPnl') or 0),
+                                'leverage': float(pos.get('leverage') or 0),
+                                'symbol': sym
+                            }
+                            break
+                    # 写回缓存
+                    try:
+                        bucket['last_position'] = position
+                        bucket['last_position_ts'] = _t.time()
+                    except Exception:
+                        pass
+            except Exception:
+                position = None
+            try:
+                last_ts = bucket.get('last_analysis_ts', 0)
+            except Exception:
+                last_ts = 0
+            tpsl = (bucket.get('tpsl_expected') or {'tp': None, 'sl': None})
+            results.append({
+                'symbol': sym,
+                'price': price,
+                'position': position,
+                'timeframe': deepseekok2.TRADE_CONFIG['timeframe'],
+                'last_update': bot_state.web_data.get('last_update'),
+                'tpsl_expected': tpsl
+            })
+        return jsonify({'items': results})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/position/tpsl', methods=['POST'])
+def api_set_position_tpsl():
+    try:
+        data = request.get_json(force=True)
+        symbol = data.get('symbol')
+        tp = data.get('take_profit')
+        sl = data.get('stop_loss')
+        if not symbol:
+            return jsonify({'ok': False, 'error': 'symbol required'}), 400
+        from bot.state import switch_active_symbol
+        switch_active_symbol(symbol)
+        deepseekok2.TRADE_CONFIG['symbol'] = symbol
+        from bot.okx import set_position_tp_sl_for_okx
+        ok = set_position_tp_sl_for_okx(tp, sl, None)
+        return jsonify({'ok': bool(ok)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
+
+@app.route('/api/position/close', methods=['POST'])
+def api_close_position():
+    try:
+        data = request.get_json(force=True)
+        symbol = data.get('symbol')
+        if not symbol:
+            return jsonify({'ok': False, 'error': 'symbol required'}), 400
+        from bot.state import switch_active_symbol
+        switch_active_symbol(symbol)
+        deepseekok2.TRADE_CONFIG['symbol'] = symbol
+        pos = deepseekok2.get_current_position()
+        if not pos or not pos.get('size'):
+            return jsonify({'ok': False, 'error': 'no position'}), 400
+        side = pos.get('side')
+        size = float(pos.get('size'))
+        from bot.okx import compute_aggressive_limit_price
+        # 获取当前价
+        try:
+            ohlcv = deepseekok2.exchange.fetch_ohlcv(symbol, deepseekok2.TRADE_CONFIG['timeframe'], limit=1)
+            mark_price = ohlcv[0][4] if ohlcv and len(ohlcv) > 0 else None
+        except Exception:
+            mark_price = None
+        if mark_price is None:
+            return jsonify({'ok': False, 'error': 'price unavailable'}), 500
+        order_side = 'sell' if side == 'long' else 'buy'
+        px = compute_aggressive_limit_price(order_side, float(mark_price))
+        params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': 'web-close'}
+        try:
+            if bot_state.ACCOUNT_POS_MODE == 'long_short' and side in ('long', 'short'):
+                params['posSide'] = side
+        except Exception:
+            pass
+        deepseekok2.exchange.create_order(symbol=symbol, type='limit', side=order_side, amount=size, price=px, params=params)
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 @app.route('/api/test_ai')
 def test_ai_connection():
@@ -251,7 +424,11 @@ def initialize_data():
             if deepseekok2.web_data['current_position']:
                 deepseekok2.web_data['performance']['total_profit'] = deepseekok2.web_data['current_position'].get('unrealized_pnl', 0)
             
-            print(f"✅ 初始化完成 - BTC价格: ${price_data['price']:,.2f}")
+            try:
+                sym = deepseekok2.TRADE_CONFIG['symbol']
+            except Exception:
+                sym = 'BTC/USDT:USDT'
+            print(f"✅ 初始化完成 - {sym} 价格: ${price_data['price']:,.2f}")
             print(f"✅ K线数据: {len(price_data['kline_data'])}条")
         else:
             print("⚠️ 获取K线数据失败")
@@ -281,7 +458,11 @@ def run_realtime_update():
 if __name__ == '__main__':
     # 立即初始化数据
     print("\n" + "="*60)
-    print("🚀 启动BTC交易机器人Web监控...")
+    try:
+        _sym = deepseekok2.TRADE_CONFIG['symbol']
+    except Exception:
+        _sym = 'BTC/USDT:USDT'
+    print(f"🚀 启动{_sym}交易机器人Web监控...")
     print("="*60 + "\n")
     
     initialize_data()

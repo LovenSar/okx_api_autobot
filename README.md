@@ -59,7 +59,7 @@ docker-compose up -d
 示例：
 ```python
 TRADE_CONFIG = {
-    'symbol': 'BTC/USDT:USDT',
+    'symbol': 'BTC/USDT:USDT',  # 可通过环境变量 SYMBOL/TRADE_SYMBOL/OKX_SYMBOL 覆盖
     'amount': 0.001,
     'leverage': 10,
     'timeframe': config.TIMEFRAME,
@@ -80,6 +80,34 @@ TRADE_CONFIG = {
 - Web 面板：账户/持仓/收益曲线/K 线/AI 决策/交易记录/统计
 
 ---
+
+### 支持的合约与环境变量
+
+- 默认支持以下USDT本位永续：
+  - BTC/USDT:USDT, ETH/USDT:USDT, SOL/USDT:USDT, BNB/USDT:USDT, DOGE/USDT:USDT, XRP/USDT:USDT
+- 可通过以下任一变量指定单个交易对（按优先级）：`SYMBOL` > `TRADE_SYMBOL` > `OKX_SYMBOL`
+  - 支持格式：
+    - ccxt风格：`BTC/USDT:USDT`
+    - OKX instId：`BTC-USDT-SWAP`
+    - 简写：`BTCUSDT`
+
+示例 `.env`：
+```env
+SYMBOL=ETHUSDT
+# 或
+# SYMBOL=SOL/USDT:USDT
+# 或
+# OKX_SYMBOL=BTC-USDT-SWAP
+```
+
+### 多交易对顺序轮询与同时持仓
+
+- 使用 `SYMBOLS`（或 `TRADE_SYMBOLS` / `OKX_SYMBOLS`）配置多个交易对，逗号/分号分隔：
+```env
+SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,DOGEUSDT,XRPUSDT
+```
+- 机器人会按顺序对每个交易对轮询执行：获取行情 → AI决策 → 下单/管理持仓。
+- 内部按交易对隔离运行态（信号历史、退避计时、加仓计数等），可实现同时持仓多合约。
 
 ## 目录结构
 ```

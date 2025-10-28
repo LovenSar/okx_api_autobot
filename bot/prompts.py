@@ -169,8 +169,15 @@ def analyze_with_deepseek(price_data):
         pass
 
     prev_ai_raw = _format_prev_ai_raw_for_prompt()
+    try:
+        symbol = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
+        base = symbol.split('/')[0]
+    except Exception:
+        symbol = 'BTC/USDT:USDT'
+        base = 'BTC'
+
     prompt = f"""
-    你是一个专业的加密货币交易分析师。请基于以下BTC/USDT {TRADE_CONFIG['timeframe']} 周期数据进行分析：
+    你是一个专业的加密货币交易分析师。请基于以下{symbol} {TRADE_CONFIG['timeframe']} 周期数据进行分析：
 
     {kline_text}
 
@@ -187,7 +194,7 @@ def analyze_with_deepseek(price_data):
     - 时间: {price_data['timestamp']}
     - 本K线最高: ${price_data['high']:,.2f}
     - 本K线最低: ${price_data['low']:,.2f}
-    - 本K线成交量: {price_data['volume']:.2f} BTC
+    - 本K线成交量: {price_data['volume']:.2f} {base}
     - 价格变化: {price_data['price_change']:+.2f}%
     - 当前持仓: {position_text}{pnl_text}
     - 当前未成交普通订单（最多10条）：
@@ -215,6 +222,7 @@ def analyze_with_deepseek(price_data):
 
     请用以下 JSON 格式回复：
     {{
+        "symbol": "{symbol}",
         "signal": "BUY|SELL|HOLD",
         "reason": "说明为什么做出这个决定，建议做多还是做空，还是继续持仓，加仓还是减仓。",
         "stop_loss": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格）

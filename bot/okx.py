@@ -7,6 +7,7 @@ import config
 from datetime import datetime
 
 from .context import exchange, TRADE_CONFIG, logger
+from .state import ensure_symbol_bucket
 from .state import ACCOUNT_POS_MODE
 
 
@@ -547,12 +548,25 @@ def cancel_existing_tpsl_for_position(pos_side: str = None) -> dict:
 
 def get_current_position():
     try:
-        positions = exchange.fetch_positions([TRADE_CONFIG['symbol']])
+        sym = TRADE_CONFIG['symbol']
+        bucket = None
+        try:
+            bucket = ensure_symbol_bucket(sym)
+        except Exception:
+            bucket = None
+        import time as _t
+        # 优先用缓存，超过节流再刷新
+        if bucket is not None:
+            pos_cached = bucket.get('last_position')
+            pos_ts = float(bucket.get('last_position_ts') or 0)
+            if pos_cached and (_t.time() - pos_ts) < float(getattr(config, 'PRIVATE_UPDATE_INTERVAL_SECONDS', 60)):
+                return pos_cached
+        positions = exchange.fetch_positions([sym])
         for pos in positions:
-            if pos['symbol'] == TRADE_CONFIG['symbol']:
+            if pos['symbol'] == sym:
                 contracts = float(pos['contracts']) if pos['contracts'] else 0
                 if contracts > 0:
-                    return {
+                    cur = {
                         'side': pos['side'],
                         'size': contracts,
                         'entry_price': float(pos['entryPrice']) if pos['entryPrice'] else 0,
@@ -560,6 +574,19 @@ def get_current_position():
                         'leverage': float(pos['leverage']) if pos['leverage'] else TRADE_CONFIG['leverage'],
                         'symbol': pos['symbol']
                     }
+                    if bucket is not None:
+                        try:
+                            bucket['last_position'] = cur
+                            bucket['last_position_ts'] = _t.time()
+                        except Exception:
+                            pass
+                    return cur
+        if bucket is not None:
+            try:
+                bucket['last_position'] = None
+                bucket['last_position_ts'] = _t.time()
+            except Exception:
+                pass
         return None
     except Exception as e:
         print(f"获取持仓失败: {e}")
@@ -606,16 +633,11 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
         except Exception:
             pass
 
-        params = {
+        base_params = {
             'instId': inst_id,
             'tdMode': 'cross',
             'side': order_side,
-            'ordType': 'conditional',
             'reduceOnly': 'true',
-            'tpOrdPx': '-1' if tp_price is not None else None,
-            'slOrdPx': '-1' if sl_price is not None else None,
-            'tpTriggerPxType': 'last' if tp_price is not None else None,
-            'slTriggerPxType': 'last' if sl_price is not None else None
         }
 
         if tp_price is not None:
@@ -644,31 +666,36 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
                 pos_size_contracts = int(float(curpos['size']))
         except Exception:
             pos_size_contracts = None
-
-        if pos_size_contracts:
-            params['sz'] = str(pos_size_contracts)
-        else:
-            params['closeFraction'] = '1'
+        if not pos_size_contracts or pos_size_contracts <= 0:
+            print("当前无有效持仓，跳过TP/SL设置")
+            return False
+        base_params['sz'] = str(pos_size_contracts)
 
         ok_any = False
         if tp_price is not None:
-            tp_req = {k: v for k, v in params.items() if v is not None}
-            for key in list(tp_req.keys()):
-                if key.startswith('sl'):
-                    tp_req.pop(key, None)
+            tp_req = dict(base_params)
+            tp_req.update({
+                'ordType': 'conditional',
+                'tpTriggerPx': _format_price_for_okx(tp_price),
+                'tpOrdPx': _format_price_for_okx(tp_price - (0.1)),
+                'tpTriggerPxType': 'last',
+            })
             try:
-                exchange.privatePostTradeOrderAlgo(tp_req)
+                exchange.privatePostTradeOrderAlgo({k: v for k, v in tp_req.items() if v is not None})
                 print(f"✓ 已提交持仓止盈设置: {tp_req}")
                 ok_any = True
             except Exception as e:
                 print(f"⚠️ 止盈设置失败: {e}")
         if sl_price is not None:
-            sl_req = {k: v for k, v in params.items() if v is not None}
-            for key in list(sl_req.keys()):
-                if key.startswith('tp'):
-                    sl_req.pop(key, None)
+            sl_req = dict(base_params)
+            sl_req.update({
+                'ordType': 'conditional',
+                'slTriggerPx': _format_price_for_okx(sl_price),
+                'slOrdPx': _format_price_for_okx(sl_price - (0.1)) if order_side == 'sell' else _format_price_for_okx(sl_price + (0.1)),
+                'slTriggerPxType': 'last',
+            })
             try:
-                exchange.privatePostTradeOrderAlgo(sl_req)
+                exchange.privatePostTradeOrderAlgo({k: v for k, v in sl_req.items() if v is not None})
                 print(f"✓ 已提交持仓止损设置: {sl_req}")
                 ok_any = True
             except Exception as e:

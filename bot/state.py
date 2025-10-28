@@ -62,3 +62,118 @@ pyramid_adds_short = 0
 ACCOUNT_POS_MODE = None  # 'net' 或 'long_short'
 
 
+# ========================
+# 多交易对按桶隔离的运行时状态
+# ========================
+
+ACTIVE_SYMBOL = None
+_SYMBOL_BUCKETS = {}
+
+_BUCKET_KEYS = [
+    'last_trade_time',
+    'last_private_update_ts',
+    'last_analysis_ts',
+    'last_price_data_cache',
+    'last_ai_call_ts',
+    'last_ai_decision_cache',
+    'ai_backoff_until_ts',
+    'ai_raw_history',
+    'signal_history',
+    'last_breakout_ts',
+    'last_pyramid_ts',
+    'pyramid_adds_long',
+    'pyramid_adds_short',
+    'tpsl_expected',
+    'web_snapshot',
+    'last_position',
+    'last_position_ts',
+]
+
+def _default_bucket():
+    return {
+        'last_trade_time': None,
+        'last_private_update_ts': 0.0,
+        'last_analysis_ts': 0.0,
+        'last_price_data_cache': None,
+        'last_ai_call_ts': 0.0,
+        'last_ai_decision_cache': None,
+        'ai_backoff_until_ts': 0.0,
+        'ai_raw_history': [],
+        'signal_history': [],
+        'last_breakout_ts': 0.0,
+        'last_pyramid_ts': 0.0,
+        'pyramid_adds_long': 0,
+        'pyramid_adds_short': 0,
+        'tpsl_expected': {'tp': None, 'sl': None},
+        'web_snapshot': {},
+        'last_position': None,
+        'last_position_ts': 0.0,
+    }
+
+def ensure_symbol_bucket(symbol: str):
+    s = str(symbol or '').strip()
+    if not s:
+        return _default_bucket()
+    if s not in _SYMBOL_BUCKETS:
+        _SYMBOL_BUCKETS[s] = _default_bucket()
+    return _SYMBOL_BUCKETS[s]
+
+def _save_globals_to_bucket(symbol: str):
+    b = ensure_symbol_bucket(symbol)
+    b['last_trade_time'] = last_trade_time
+    b['last_private_update_ts'] = last_private_update_ts
+    b['last_analysis_ts'] = last_analysis_ts
+    b['last_price_data_cache'] = last_price_data_cache
+    b['last_ai_call_ts'] = last_ai_call_ts
+    b['last_ai_decision_cache'] = last_ai_decision_cache
+    b['ai_backoff_until_ts'] = ai_backoff_until_ts
+    b['ai_raw_history'] = ai_raw_history
+    b['signal_history'] = signal_history
+    b['last_breakout_ts'] = last_breakout_ts
+    b['last_pyramid_ts'] = last_pyramid_ts
+    b['pyramid_adds_long'] = pyramid_adds_long
+    b['pyramid_adds_short'] = pyramid_adds_short
+
+def _load_bucket_to_globals(symbol: str):
+    b = ensure_symbol_bucket(symbol)
+    global last_trade_time, last_private_update_ts, last_analysis_ts, last_price_data_cache
+    global last_ai_call_ts, last_ai_decision_cache, ai_backoff_until_ts, ai_raw_history, signal_history
+    global last_breakout_ts, last_pyramid_ts, pyramid_adds_long, pyramid_adds_short
+    last_trade_time = b.get('last_trade_time')
+    last_private_update_ts = b.get('last_private_update_ts', 0.0)
+    last_analysis_ts = b.get('last_analysis_ts', 0.0)
+    last_price_data_cache = b.get('last_price_data_cache')
+    last_ai_call_ts = b.get('last_ai_call_ts', 0.0)
+    last_ai_decision_cache = b.get('last_ai_decision_cache')
+    ai_backoff_until_ts = b.get('ai_backoff_until_ts', 0.0)
+    ai_raw_history = b.get('ai_raw_history') or []
+    signal_history = b.get('signal_history') or []
+    last_breakout_ts = b.get('last_breakout_ts', 0.0)
+    last_pyramid_ts = b.get('last_pyramid_ts', 0.0)
+    pyramid_adds_long = b.get('pyramid_adds_long', 0)
+    pyramid_adds_short = b.get('pyramid_adds_short', 0)
+
+def set_symbol_tpsl_expected(symbol: str, take_profit, stop_loss):
+    try:
+        b = ensure_symbol_bucket(symbol)
+        b['tpsl_expected'] = {'tp': take_profit, 'sl': stop_loss}
+    except Exception:
+        pass
+
+def set_symbol_web_snapshot(symbol: str, snapshot: dict):
+    try:
+        b = ensure_symbol_bucket(symbol)
+        b['web_snapshot'] = snapshot or {}
+    except Exception:
+        pass
+
+def switch_active_symbol(symbol: str):
+    global ACTIVE_SYMBOL
+    try:
+        if ACTIVE_SYMBOL:
+            _save_globals_to_bucket(ACTIVE_SYMBOL)
+    except Exception:
+        pass
+    ACTIVE_SYMBOL = symbol
+    _load_bucket_to_globals(symbol)
+
