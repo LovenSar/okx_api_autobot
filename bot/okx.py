@@ -11,28 +11,41 @@ from .state import ensure_symbol_bucket
 from .state import ACCOUNT_POS_MODE
 
 
-def _with_rate_limit_retry(callable_fn):
-    """调用OKX/CCXT接口，若命中限频(50011或"Too Many Requests")则等待30秒后重试一次。"""
-    try:
-        resp = callable_fn()
+def _with_rate_limit_retry(callable_fn, max_retries: int = None, wait_seconds: int = 30):
+    """调用OKX/CCXT接口，若命中限频(50011或"Too Many Requests")则按固定间隔退避重试。
+
+    参数:
+    - max_retries: 最大重试次数（不含首次调用），默认3
+    - wait_seconds: 每次退避等待秒数，默认30
+    """
+    attempt = 0
+    while True:
         try:
-            if isinstance(resp, dict):
-                code = str(resp.get('code')) if 'code' in resp else None
-                msg = str(resp.get('msg') or '')
-                if code == '50011' or ('Too Many Requests' in msg):
-                    print('OKX限频(50011): 等待30秒后重试...')
-                    time.sleep(30)
-                    return callable_fn()
-        except Exception:
-            pass
-        return resp
-    except Exception as e:
-        em = str(e)
-        if ('Too Many Requests' in em) or ('50011' in em):
-            print('OKX限频异常(50011): 等待30秒后重试...')
-            time.sleep(30)
-            return callable_fn()
-        raise
+            resp = callable_fn()
+            try:
+                if isinstance(resp, dict):
+                    code = str(resp.get('code')) if 'code' in resp else None
+                    msg = str(resp.get('msg') or '')
+                    if code == '50011' or ('Too Many Requests' in msg):
+                        if (max_retries is not None) and (attempt >= max_retries):
+                            return resp
+                        print(f'OKX限频(50011): 等待{wait_seconds}秒后重试... (第{attempt+1}次)')
+                        time.sleep(wait_seconds)
+                        attempt += 1
+                        continue
+            except Exception:
+                pass
+            return resp
+        except Exception as e:
+            em = str(e)
+            if ('Too Many Requests' in em) or ('50011' in em):
+                if (max_retries is not None) and (attempt >= max_retries):
+                    raise
+                print(f'OKX限频异常(50011): 等待{wait_seconds}秒后重试... (第{attempt+1}次)')
+                time.sleep(wait_seconds)
+                attempt += 1
+                continue
+            raise
 
 def _get_okx_inst_id() -> str:
     try:

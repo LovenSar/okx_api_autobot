@@ -4,7 +4,7 @@ import config
 
 from bot.context import AI_PROVIDER, AI_MODEL, exchange, TRADE_CONFIG, get_symbol_leverage, set_symbol_leverage
 from bot import state
-from bot.okx import get_current_position, setup_exchange
+from bot.okx import get_current_position, setup_exchange, _with_rate_limit_retry
 from bot.indicators import get_btc_ohlcv_enhanced
 from bot.prompts import analyze_with_deepseek_with_retry, test_ai_connection
 from bot.trade import execute_trade
@@ -31,7 +31,7 @@ def update_realtime_data():
     try:
         # 多币对轮询：只更新当前ACTIVE_SYMBOL的实时数据
         symbol = TRADE_CONFIG['symbol']
-        ohlcv = exchange.fetch_ohlcv(symbol, TRADE_CONFIG['timeframe'], limit=1)
+        ohlcv = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(symbol, TRADE_CONFIG['timeframe'], limit=1))
         if ohlcv and len(ohlcv) > 0:
             current_price = ohlcv[0][4]
             state.web_data['current_price'] = current_price
@@ -39,7 +39,7 @@ def update_realtime_data():
         now_ts = time.time()
         if now_ts - state.last_private_update_ts >= state.PRIVATE_UPDATE_INTERVAL:
             state.web_data['current_position'] = get_current_position()
-            balance = exchange.fetch_balance()
+            balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
             current_equity = balance['USDT']['total']
             if state.initial_balance is None:
                 state.initial_balance = current_equity
@@ -98,7 +98,7 @@ def trading_bot():
                 b = ensure_symbol_bucket(sym)
                 last_ts = float(b.get('last_private_update_ts') or 0)
                 if (_t.time() - last_ts) >= float(config.PRIVATE_UPDATE_INTERVAL_SECONDS):
-                    balance = exchange.fetch_balance()
+                    balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
                     current_equity = balance['USDT']['total']
                     state.web_data['account_info'] = {
                         'usdt_balance': balance['USDT']['free'],
@@ -171,7 +171,7 @@ def trading_bot():
                 set_symbol_leverage(_sym, lv)
                 try:
                     # 设置交易所杠杆（跨保证金模式）
-                    exchange.set_leverage(lv, _sym, {'mgnMode': 'cross'})
+                    _with_rate_limit_retry(lambda: exchange.set_leverage(lv, _sym, {'mgnMode': 'cross'}))
                     print(f"应用AI杠杆: {_sym} → {lv}x")
                 except Exception as _e:
                     print(f"应用AI杠杆失败({_sym}): {_e}")

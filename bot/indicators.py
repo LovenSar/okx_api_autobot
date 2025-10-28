@@ -3,6 +3,7 @@ from datetime import datetime
 import pandas as pd
 
 from .context import exchange, TRADE_CONFIG
+from .okx import _with_rate_limit_retry
 from . import state
 
 
@@ -133,7 +134,7 @@ def get_btc_ohlcv_enhanced():
         now_ts = time.time()
         if (state.last_price_data_cache is not None) and (now_ts - state.last_analysis_ts < float(state.ANALYSIS_UPDATE_INTERVAL or 0)):
             try:
-                ohlcv_latest = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'], limit=1)
+                ohlcv_latest = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'], limit=1))
                 if ohlcv_latest and len(ohlcv_latest) > 0:
                     state.last_price_data_cache['price'] = ohlcv_latest[0][4]
                     state.last_price_data_cache['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -141,8 +142,13 @@ def get_btc_ohlcv_enhanced():
                 pass
             return state.last_price_data_cache
 
-        ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
-                                     limit=TRADE_CONFIG['data_points'])
+        ohlcv = _with_rate_limit_retry(
+            lambda: exchange.fetch_ohlcv(
+                TRADE_CONFIG['symbol'],
+                TRADE_CONFIG['timeframe'],
+                limit=TRADE_CONFIG['data_points']
+            )
+        )
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -152,7 +158,7 @@ def get_btc_ohlcv_enhanced():
         trend_4h = None
         boll_4h = None
         try:
-            ohlcv_4h = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120)
+            ohlcv_4h = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120))
             df4 = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df4['timestamp'] = pd.to_datetime(df4['timestamp'], unit='ms')
             df4['bb_middle'] = df4['close'].rolling(20).mean()
@@ -189,7 +195,7 @@ def get_btc_ohlcv_enhanced():
         levels_15m = None
         kline_15m_data = None
         try:
-            ohlcv_15m = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '15m', limit=96)
+            ohlcv_15m = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '15m', limit=96))
             df15 = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df15['timestamp'] = pd.to_datetime(df15['timestamp'], unit='ms')
             df15['bb_middle'] = df15['close'].rolling(20).mean()

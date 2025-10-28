@@ -11,6 +11,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # 导入主程序
 import deepseekok2
+from bot.okx import _with_rate_limit_retry
 import json
 import config
 from bot import state as bot_state
@@ -404,7 +405,7 @@ def multi_overview():
                 price = None
             if price is None:
                 try:
-                    ohlcv = deepseekok2.exchange.fetch_ohlcv(sym, deepseekok2.TRADE_CONFIG['timeframe'], limit=1)
+                    ohlcv = _with_rate_limit_retry(lambda: deepseekok2.exchange.fetch_ohlcv(sym, deepseekok2.TRADE_CONFIG['timeframe'], limit=1))
                     if ohlcv and len(ohlcv) > 0:
                         price = ohlcv[0][4]
                 except Exception:
@@ -419,7 +420,7 @@ def multi_overview():
                 if pos_cached and not should_refresh:
                     position = pos_cached
                 else:
-                    positions = deepseekok2.exchange.fetch_positions([sym])
+                    positions = _with_rate_limit_retry(lambda: deepseekok2.exchange.fetch_positions([sym]))
                     for pos in positions:
                         if pos.get('symbol') == sym and float(pos.get('contracts') or 0) > 0:
                             position = {
@@ -493,7 +494,7 @@ def initialize_data():
         # 设置交易所（如果还没设置）
         try:
             # 测试一下exchange是否可用
-            deepseekok2.exchange.fetch_balance()
+            _with_rate_limit_retry(lambda: deepseekok2.exchange.fetch_balance())
         except:
             # 如果不可用，进行设置
             if not deepseekok2.setup_exchange():
@@ -505,7 +506,7 @@ def initialize_data():
         if price_data:
             # 更新账户信息
             try:
-                balance = deepseekok2.exchange.fetch_balance()
+                balance = _with_rate_limit_retry(lambda: deepseekok2.exchange.fetch_balance())
                 deepseekok2.web_data['account_info'] = {
                     'usdt_balance': balance['USDT']['free'],
                     'total_equity': balance['USDT']['total']
@@ -533,7 +534,7 @@ def initialize_data():
                 # 初始化时确保设置一次该符号的杠杆
                 from bot.context import get_symbol_leverage as _lev
                 lev = int(_lev(sym))
-                deepseekok2.exchange.set_leverage(lev, sym, {'mgnMode': 'cross'})
+                _with_rate_limit_retry(lambda: deepseekok2.exchange.set_leverage(lev, sym, {'mgnMode': 'cross'}))
                 print(f"✅ 初始化杠杆: {sym} => {lev}x")
             except Exception as _e:
                 print(f"⚠️ 初始化杠杆失败: {_e}")

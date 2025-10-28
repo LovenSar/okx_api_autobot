@@ -39,6 +39,8 @@ exchange = ccxt.okx({
     'apiKey': os.getenv('OKX_API_KEY'),
     'secret': os.getenv('OKX_SECRET'),
     'password': os.getenv('OKX_PASSWORD'),
+    'enableRateLimit': True,
+    'rateLimit': 100,
 })
 
 # 合约符号规范化为 ccxt 风格: "BTC/USDT:USDT"

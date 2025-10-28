@@ -18,6 +18,7 @@ from .okx import (
     get_contract_size_btc,
 )
 from .context import exchange
+from .okx import _with_rate_limit_retry
 from .state import set_symbol_tpsl_expected
 from .utils import update_win_statistics, save_realized_pnl, append_trade_to_file
 
@@ -86,7 +87,7 @@ def execute_trade(signal_data, price_data):
                         time.sleep(float(state.PRIVATE_UPDATE_INTERVAL or 1))
                         refreshed_position = get_current_position()
                         state.web_data['current_position'] = refreshed_position
-                        balance = exchange.fetch_balance()
+                        balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
                         state.web_data['account_info'] = {
                             'usdt_balance': balance['USDT']['free'],
                             'total_equity': balance['USDT']['total']
@@ -167,7 +168,7 @@ def execute_trade(signal_data, price_data):
         except Exception:
             usdt_balance = None
         if usdt_balance is None:
-            balance = exchange.fetch_balance()
+            balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
             usdt_balance = balance['USDT']['free']
 
         base_amount_btc = TRADE_CONFIG['amount']
@@ -220,7 +221,7 @@ def execute_trade(signal_data, price_data):
                 except Exception:
                     realized = 0.0
                 close_px = compute_aggressive_limit_price('buy', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=current_position['size'], price=close_px, params=params)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=current_position['size'], price=close_px, params=params))
                 try:
                     update_win_statistics(realized, size_contracts)
                 except Exception:
@@ -232,7 +233,7 @@ def execute_trade(signal_data, price_data):
                     params['posSide'] = 'long'
                 p2 = params
                 open_px = compute_aggressive_limit_price('buy', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px, params=p2)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px, params=p2))
                 state.realized_profit_usdt += realized
                 save_realized_pnl()
                 try:
@@ -257,7 +258,7 @@ def execute_trade(signal_data, price_data):
                                         params['posSide'] = 'long'
                                     p3 = params
                                     add_px = compute_aggressive_limit_price('buy', mark_price)
-                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=add_contracts, price=add_px, params=p3)
+                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=add_contracts, price=add_px, params=p3))
                                     state.pyramid_adds_long += 1
                                     state.last_pyramid_ts = now_ts
                                     print(f"连涨加仓完成，累计加仓次数(long)={state.pyramid_adds_long}")
@@ -282,7 +283,7 @@ def execute_trade(signal_data, price_data):
                     params['posSide'] = 'long'
                 p1 = params
                 open_px2 = compute_aggressive_limit_price('buy', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px2, params=p1)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px2, params=p1))
                 try:
                     executed_contracts += int(long_size)
                 except Exception:
@@ -304,7 +305,7 @@ def execute_trade(signal_data, price_data):
                 except Exception:
                     realized = 0.0
                 close_px = compute_aggressive_limit_price('sell', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=current_position['size'], price=close_px, params=params)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=current_position['size'], price=close_px, params=params))
                 try:
                     update_win_statistics(realized, size_contracts)
                 except Exception:
@@ -316,7 +317,7 @@ def execute_trade(signal_data, price_data):
                     params['posSide'] = 'short'
                 p4 = params
                 open_px = compute_aggressive_limit_price('sell', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px, params=p4)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px, params=p4))
                 state.realized_profit_usdt += realized
                 save_realized_pnl()
                 try:
@@ -341,7 +342,7 @@ def execute_trade(signal_data, price_data):
                                         params['posSide'] = 'short'
                                     p5 = params
                                     add_px = compute_aggressive_limit_price('sell', mark_price)
-                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=add_contracts, price=add_px, params=p5)
+                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=add_contracts, price=add_px, params=p5))
                                     state.pyramid_adds_short += 1
                                     state.last_pyramid_ts = now_ts
                                     print(f"连跌加仓完成，累计加仓次数(short)={state.pyramid_adds_short}")
@@ -366,7 +367,7 @@ def execute_trade(signal_data, price_data):
                     params['posSide'] = 'short'
                 p6 = params
                 open_px3 = compute_aggressive_limit_price('sell', mark_price)
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px3, params=p6)
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px3, params=p6))
                 try:
                     executed_contracts += int(short_size)
                 except Exception:
