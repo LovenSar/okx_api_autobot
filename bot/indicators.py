@@ -50,13 +50,54 @@ def get_support_resistance_levels(df, lookback=20):
         current_price = df['close'].iloc[-1]
         bb_upper = df['bb_upper'].iloc[-1]
         bb_lower = df['bb_lower'].iloc[-1]
+        # 斐波纳契回撤位（基于近 lookback 区间的 swing 高低）
+        try:
+            swing_high = float(recent_high)
+            swing_low = float(recent_low)
+            diff = max(swing_high - swing_low, 1e-9)
+            fib_levels = {
+                'fib_23_6': swing_high - 0.236 * diff,
+                'fib_38_2': swing_high - 0.382 * diff,
+                'fib_50': swing_high - 0.5 * diff,
+                'fib_61_8': swing_high - 0.618 * diff,
+                'fib_78_6': swing_high - 0.786 * diff,
+            }
+        except Exception:
+            fib_levels = None
+
+        # 枢轴位（上一交易日）
+        pivots = None
+        try:
+            if 'timestamp' in df.columns and pd.api.types.is_datetime64_any_dtype(df['timestamp']):
+                df_day = df.set_index('timestamp')
+                day_ohlc = df_day[['open', 'high', 'low', 'close']].resample('1D').agg({
+                    'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'
+                }).dropna()
+                if len(day_ohlc) >= 2:
+                    prev = day_ohlc.iloc[-2]
+                    h = float(prev['high']); l = float(prev['low']); c = float(prev['close'])
+                    pp = (h + l + c) / 3.0
+                    pivots = {
+                        'pp': pp,
+                        'r1': 2 * pp - l,
+                        's1': 2 * pp - h,
+                        'r2': pp + (h - l),
+                        's2': pp - (h - l),
+                        'r3': h + 2 * (pp - l),
+                        's3': l - 2 * (h - pp)
+                    }
+        except Exception:
+            pivots = None
+
         return {
             'static_resistance': recent_high,
             'static_support': recent_low,
             'dynamic_resistance': bb_upper,
             'dynamic_support': bb_lower,
             'price_vs_resistance': ((recent_high - current_price) / current_price) * 100,
-            'price_vs_support': ((current_price - recent_low) / recent_low) * 100
+            'price_vs_support': ((current_price - recent_low) / recent_low) * 100,
+            'fibonacci': fib_levels,
+            'pivots': pivots
         }
     except Exception as e:
         print(f"支撑阻力计算失败: {e}")

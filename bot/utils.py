@@ -63,6 +63,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 AI_DECISIONS_LOG_PATH = os.path.join(DATA_DIR, 'ai_decisions.jsonl')
 TRADES_LOG_PATH = os.path.join(DATA_DIR, 'trades.jsonl')
+PROFIT_CURVE_LOG_PATH = os.path.join(DATA_DIR, 'profit_curve.jsonl')
 REALIZED_PNL_PATH = os.path.join(DATA_DIR, 'realized_pnl.json')
 
 
@@ -78,6 +79,14 @@ def append_trade_to_file(trade: dict) -> None:
     try:
         with open(TRADES_LOG_PATH, 'a', encoding='utf-8') as f:
             f.write(json.dumps(trade, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+
+
+def append_profit_point_to_file(point: dict) -> None:
+    try:
+        with open(PROFIT_CURVE_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(point, ensure_ascii=False) + '\n')
     except Exception:
         pass
 

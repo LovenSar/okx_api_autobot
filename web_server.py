@@ -14,7 +14,20 @@ import deepseekok2
 import json
 import config
 from bot import state as bot_state
-from bot.utils import TRADES_LOG_PATH
+
+# 辅助：根据当前符号返回前端展示用杠杆（每币种映射或全局回退）
+def __get_leverage_for_symbol(sym):
+    try:
+        if not sym:
+            return deepseekok2.TRADE_CONFIG['leverage']
+        from bot.context import get_symbol_leverage
+        return int(get_symbol_leverage(sym))
+    except Exception:
+        try:
+            return int(deepseekok2.TRADE_CONFIG['leverage'])
+        except Exception:
+            return 10
+from bot.utils import TRADES_LOG_PATH, PROFIT_CURVE_LOG_PATH
 
 # 明确指定模板和静态文件路径
 app = Flask(__name__, 
@@ -56,9 +69,10 @@ def get_dashboard_data():
             'config': {
                 'symbol': deepseekok2.TRADE_CONFIG['symbol'],
                 'symbols': deepseekok2.TRADE_CONFIG.get('symbols', [deepseekok2.TRADE_CONFIG['symbol']]),
-                'leverage': deepseekok2.TRADE_CONFIG['leverage'],
+                'leverage': __get_leverage_for_symbol(deepseekok2.TRADE_CONFIG.get('symbol')), 
                 'timeframe': deepseekok2.TRADE_CONFIG['timeframe'],
-                'test_mode': deepseekok2.TRADE_CONFIG['test_mode']
+                'test_mode': deepseekok2.TRADE_CONFIG['test_mode'],
+                'min_trade_interval_seconds': int(config.TRADE_MIN_INTERVAL_SECONDS)
             }
         }
         return jsonify(data)
@@ -256,9 +270,52 @@ def get_signal_history():
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
-    """获取收益曲线数据"""
+    """获取收益曲线数据：优先从日志文件读取，支持 limit（默认1000，最大20000），失败回退内存。"""
     try:
-        return jsonify(deepseekok2.web_data['profit_curve'])
+        limit = request.args.get('limit', default=1000, type=int)
+        limit = max(1, min(limit, 20000))
+
+        items = []
+        try:
+            if os.path.exists(PROFIT_CURVE_LOG_PATH):
+                with open(PROFIT_CURVE_LOG_PATH, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    buffer = bytearray()
+                    lines = []
+                    block_size = 4096
+                    pos = file_size
+                    while pos > 0 and len(lines) <= limit:
+                        read_size = block_size if pos >= block_size else pos
+                        pos -= read_size
+                        f.seek(pos)
+                        chunk = f.read(read_size)
+                        buffer[0:0] = chunk
+                        while True:
+                            newline_index = buffer.rfind(b'\n')
+                            if newline_index == -1:
+                                break
+                            line = buffer[newline_index+1:]
+                            buffer = buffer[:newline_index]
+                            if line.strip():
+                                lines.append(line)
+                            if len(lines) >= limit:
+                                break
+                    if len(lines) < limit and buffer.strip():
+                        lines.append(buffer)
+                lines = list(reversed(lines))
+                for b in lines:
+                    try:
+                        items.append(json.loads(b.decode('utf-8')))
+                    except Exception:
+                        continue
+        except Exception:
+            items = []
+
+        if not items:
+            items = deepseekok2.web_data['profit_curve'][-limit:]
+
+        return jsonify(items)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -387,72 +444,29 @@ def multi_overview():
             except Exception:
                 last_ts = 0
             tpsl = (bucket.get('tpsl_expected') or {'tp': None, 'sl': None})
+            # 杠杆（配置/回退）
+            try:
+                from bot.context import get_symbol_leverage as _get_lev
+                lev_cfg = int(_get_lev(sym))
+            except Exception:
+                lev_cfg = None
+
             results.append({
                 'symbol': sym,
                 'price': price,
                 'position': position,
                 'timeframe': deepseekok2.TRADE_CONFIG['timeframe'],
                 'last_update': bot_state.web_data.get('last_update'),
-                'tpsl_expected': tpsl
+                'tpsl_expected': tpsl,
+                'leverage_cfg': lev_cfg
             })
         return jsonify({'items': results})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/position/tpsl', methods=['POST'])
-def api_set_position_tpsl():
-    try:
-        data = request.get_json(force=True)
-        symbol = data.get('symbol')
-        tp = data.get('take_profit')
-        sl = data.get('stop_loss')
-        if not symbol:
-            return jsonify({'ok': False, 'error': 'symbol required'}), 400
-        from bot.state import switch_active_symbol
-        switch_active_symbol(symbol)
-        deepseekok2.TRADE_CONFIG['symbol'] = symbol
-        from bot.okx import set_position_tp_sl_for_okx
-        ok = set_position_tp_sl_for_okx(tp, sl, None)
-        return jsonify({'ok': bool(ok)})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+# 移除Web端TP/SL与平仓交互接口（只读展示，不允许直接操作）
 
-@app.route('/api/position/close', methods=['POST'])
-def api_close_position():
-    try:
-        data = request.get_json(force=True)
-        symbol = data.get('symbol')
-        if not symbol:
-            return jsonify({'ok': False, 'error': 'symbol required'}), 400
-        from bot.state import switch_active_symbol
-        switch_active_symbol(symbol)
-        deepseekok2.TRADE_CONFIG['symbol'] = symbol
-        pos = deepseekok2.get_current_position()
-        if not pos or not pos.get('size'):
-            return jsonify({'ok': False, 'error': 'no position'}), 400
-        side = pos.get('side')
-        size = float(pos.get('size'))
-        from bot.okx import compute_aggressive_limit_price
-        # 获取当前价
-        try:
-            ohlcv = deepseekok2.exchange.fetch_ohlcv(symbol, deepseekok2.TRADE_CONFIG['timeframe'], limit=1)
-            mark_price = ohlcv[0][4] if ohlcv and len(ohlcv) > 0 else None
-        except Exception:
-            mark_price = None
-        if mark_price is None:
-            return jsonify({'ok': False, 'error': 'price unavailable'}), 500
-        order_side = 'sell' if side == 'long' else 'buy'
-        px = compute_aggressive_limit_price(order_side, float(mark_price))
-        params = {'tdMode': 'cross', 'reduceOnly': True, 'tag': 'web-close'}
-        try:
-            if bot_state.ACCOUNT_POS_MODE == 'long_short' and side in ('long', 'short'):
-                params['posSide'] = side
-        except Exception:
-            pass
-        deepseekok2.exchange.create_order(symbol=symbol, type='limit', side=order_side, amount=size, price=px, params=params)
-        return jsonify({'ok': True})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': str(e)}), 500
+# 取消平仓操作接口（保持后端安全性，仅展示）
 
 @app.route('/api/test_ai')
 def test_ai_connection():
@@ -515,6 +529,14 @@ def initialize_data():
             except Exception:
                 sym = 'BTC/USDT:USDT'
             print(f"✅ 初始化完成 - {sym} 价格: ${price_data['price']:,.2f}")
+            try:
+                # 初始化时确保设置一次该符号的杠杆
+                from bot.context import get_symbol_leverage as _lev
+                lev = int(_lev(sym))
+                deepseekok2.exchange.set_leverage(lev, sym, {'mgnMode': 'cross'})
+                print(f"✅ 初始化杠杆: {sym} => {lev}x")
+            except Exception as _e:
+                print(f"⚠️ 初始化杠杆失败: {_e}")
             print(f"✅ K线数据: {len(price_data['kline_data'])}条")
         else:
             print("⚠️ 获取K线数据失败")

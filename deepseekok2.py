@@ -2,13 +2,13 @@ import time
 from datetime import datetime
 import config
 
-from bot.context import AI_PROVIDER, AI_MODEL, exchange, TRADE_CONFIG
+from bot.context import AI_PROVIDER, AI_MODEL, exchange, TRADE_CONFIG, get_symbol_leverage, set_symbol_leverage
 from bot import state
 from bot.okx import get_current_position, setup_exchange
 from bot.indicators import get_btc_ohlcv_enhanced
 from bot.prompts import analyze_with_deepseek_with_retry, test_ai_connection
 from bot.trade import execute_trade
-from bot.utils import append_ai_decision_to_file, load_realized_pnl, AI_DECISIONS_LOG_PATH
+from bot.utils import append_ai_decision_to_file, load_realized_pnl, AI_DECISIONS_LOG_PATH, append_profit_point_to_file
 
 
 # 注入运行时节流配置到 state
@@ -121,6 +121,10 @@ def trading_bot():
                 'unrealized_pnl': unrealized_pnl
             }
             state.web_data['profit_curve'].append(profit_point)
+            try:
+                append_profit_point_to_file(profit_point)
+            except Exception:
+                pass
             if len(state.web_data['profit_curve']) > 200:
                 state.web_data['profit_curve'].pop(0)
         except Exception as e:
@@ -131,6 +135,7 @@ def trading_bot():
         state.web_data['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         state.web_data['kline_data'] = price_data['kline_data']
 
+        # 合并AI决策并附带杠杆（如有）
         ai_decision = {
             'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             'symbol': _sym,
@@ -144,7 +149,8 @@ def trading_bot():
             'trade_type': signal_data.get('trade_type'),
             'take_profit_price': signal_data.get('take_profit_price', signal_data.get('take_profit')),
             'stop_loss_price': signal_data.get('stop_loss_price', signal_data.get('stop_loss')),
-            'trailing_stop_loss': signal_data.get('trailing_stop_loss')
+            'trailing_stop_loss': signal_data.get('trailing_stop_loss'),
+            'leverage': signal_data.get('leverage')
         }
         state.web_data['ai_decisions'].append(ai_decision)
         append_ai_decision_to_file(ai_decision)
@@ -153,6 +159,22 @@ def trading_bot():
             current_position = state.web_data.get('current_position')
             unrealized_pnl = current_position.get('unrealized_pnl', 0) if current_position else 0
             state.web_data['performance']['total_profit'] = state.realized_profit_usdt + unrealized_pnl
+        except Exception:
+            pass
+
+        # 若AI给出杠杆，应用到运行时映射并尝试设置交易所杠杆
+        try:
+            ai_lev = signal_data.get('leverage')
+            if ai_lev is not None:
+                lv = int(float(ai_lev))
+                lv = max(1, min(lv, 50))
+                set_symbol_leverage(_sym, lv)
+                try:
+                    # 设置交易所杠杆（跨保证金模式）
+                    exchange.set_leverage(lv, _sym, {'mgnMode': 'cross'})
+                    print(f"应用AI杠杆: {_sym} → {lv}x")
+                except Exception as _e:
+                    print(f"应用AI杠杆失败({_sym}): {_e}")
         except Exception:
             pass
 

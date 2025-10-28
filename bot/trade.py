@@ -2,7 +2,7 @@ import time
 from datetime import datetime
 import config
 
-from .context import TRADE_CONFIG
+from .context import TRADE_CONFIG, get_symbol_leverage
 from . import state
 from .okx import (
     get_current_position,
@@ -173,14 +173,19 @@ def execute_trade(signal_data, price_data):
         base_amount_btc = TRADE_CONFIG['amount']
         desired_contracts = btc_amount_to_okx_contracts(base_amount_btc)
         mark_price = price_data['price']
-        required_margin = estimate_required_margin_usdt(desired_contracts, mark_price, TRADE_CONFIG['leverage'])
+        # 使用每币种杠杆进行保证金估算
+        try:
+            lev = int(get_symbol_leverage(TRADE_CONFIG.get('symbol')))
+        except Exception:
+            lev = int(TRADE_CONFIG.get('leverage', 10) or 10)
+        required_margin = estimate_required_margin_usdt(desired_contracts, mark_price, lev)
 
         if usdt_balance is None:
             print("⚠️ 可用余额未知，跳过交易以保证安全")
             return
 
         if required_margin > usdt_balance * 0.8:
-            max_contracts = int((usdt_balance * 0.8) / max(estimate_required_margin_usdt(1, mark_price, TRADE_CONFIG['leverage']), 1e-9))
+            max_contracts = int((usdt_balance * 0.8) / max(estimate_required_margin_usdt(1, mark_price, lev), 1e-9))
             if max_contracts < 1:
                 print(f"⚠️ 保证金不足，跳过交易。需要: {required_margin:.2f} USDT, 可用: {usdt_balance:.2f} USDT")
                 return

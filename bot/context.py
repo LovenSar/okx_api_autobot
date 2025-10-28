@@ -118,3 +118,51 @@ TRADE_CONFIG = {
 }
 
 
+# ========================
+# 每币种杠杆配置与工具函数
+# ========================
+
+# 基线杠杆建议（可按需要调整）
+_BASELINE_LEVERAGE_BY_BASE = {
+    'BTC': 10,
+    'ETH': 8,
+    'BNB': 6,
+    'SOL': 6,
+    'XRP': 5,
+    'DOGE': 5,
+}
+
+# 运行时覆盖的每币种杠杆表（key 为规范化合约符号，如 "BTC/USDT:USDT"）
+SYMBOL_LEVERAGE_MAP = {}
+
+def _get_base_from_symbol(sym: str) -> str:
+    try:
+        s = _normalize_symbol(sym)
+        return s.split('/')[0]
+    except Exception:
+        return 'BTC'
+
+def get_symbol_leverage(sym: str) -> int:
+    """获取指定合约符号的杠杆，优先返回运行时覆盖，其次返回基线，最后回退到 TRADE_CONFIG['leverage']。"""
+    try:
+        s = _normalize_symbol(sym)
+        if s in SYMBOL_LEVERAGE_MAP:
+            return int(SYMBOL_LEVERAGE_MAP[s])
+        base = _get_base_from_symbol(s)
+        return int(_BASELINE_LEVERAGE_BY_BASE.get(base, TRADE_CONFIG['leverage']))
+    except Exception:
+        try:
+            return int(TRADE_CONFIG['leverage'])
+        except Exception:
+            return 10
+
+def set_symbol_leverage(sym: str, leverage: int) -> None:
+    """设置运行时每币种杠杆（写入内存映射）。"""
+    try:
+        lev = int(leverage)
+        lev = max(1, lev)
+    except Exception:
+        return
+    s = _normalize_symbol(sym)
+    SYMBOL_LEVERAGE_MAP[s] = lev
+

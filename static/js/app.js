@@ -2,6 +2,8 @@
 let profitChart = null;
 let signalChart = null;
 let confidenceChart = null;
+let backendDecisionIntervalSec = null;
+let lastDecisionAtMs = null;
 
 // 初始化
 document.addEventListener('DOMContentLoaded', async function() {
@@ -12,13 +14,17 @@ document.addEventListener('DOMContentLoaded', async function() {
         const cfgResp = await fetch('/api/config');
         const cfg = await cfgResp.json();
         const intervalMs = (cfg && cfg.frontend_refresh_interval_ms) ? cfg.frontend_refresh_interval_ms : 1000;
+        backendDecisionIntervalSec = (cfg && cfg.backend_decision_interval_seconds != null)
+            ? Number(cfg.backend_decision_interval_seconds) : null;
         // 每配置的间隔更新一次数据（实时显示价格和持仓）
         setInterval(updateData, intervalMs);
         setInterval(updateMultiOverview, Math.max(2000, intervalMs * 2));
+        setInterval(updateNextDecisionCountdown, 1000);
     } catch (e) {
         // 回退到1秒
         setInterval(updateData, 1000);
         setInterval(updateMultiOverview, 2000);
+        setInterval(updateNextDecisionCountdown, 1000);
     }
 });
 
@@ -41,6 +47,46 @@ function initCharts() {
     });
 }
 
+// 解析AI决策时间字符串
+function parseDecisionTimestamp(ts) {
+    if (!ts) return NaN;
+    // 优先尝试Date直接解析
+    const d = new Date(ts);
+    const t = d.getTime();
+    if (!isNaN(t)) return t;
+    // 尝试常见格式: YYYY-MM-DD HH:mm:ss
+    const m = ts.match(/(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (m) {
+        const year = Number(m[1]);
+        const month = Number(m[2]) - 1;
+        const day = Number(m[3]);
+        const hour = Number(m[4]);
+        const min = Number(m[5]);
+        const sec = Number(m[6]);
+        return new Date(year, month, day, hour, min, sec).getTime();
+    }
+    return NaN;
+}
+
+// 更新“下次决策”倒计时
+function updateNextDecisionCountdown() {
+    try {
+        const el = document.getElementById('nextDecisionCountdown');
+        if (!el) return;
+        if (!backendDecisionIntervalSec || !lastDecisionAtMs) {
+            el.textContent = '下次决策: -- 秒';
+            return;
+        }
+        const now = Date.now();
+        const nextAt = lastDecisionAtMs + backendDecisionIntervalSec * 1000;
+        let remainMs = Math.max(0, nextAt - now);
+        const remainSec = Math.ceil(remainMs / 1000);
+        el.textContent = `下次决策: ${remainSec} 秒`;
+    } catch (e) {
+        // 忽略渲染错误
+    }
+}
+
 // 更新所有数据
 async function updateData() {
     try {
@@ -58,6 +104,8 @@ async function updateData() {
         
         // 更新AI决策
         await updateAIDecisions();
+        // 若后端没有最新决策返回（或未更新），也定时刷新倒计时
+        updateNextDecisionCountdown();
         
         // 更新交易记录
         await updateTrades();
@@ -155,11 +203,11 @@ async function updateDashboard() {
         document.getElementById('totalEquity').textContent = 
             data.account_info?.total_equity ? `$${data.account_info.total_equity.toFixed(2)}` : '--';
         
-        // 配置信息
-        document.getElementById('leverage').textContent = 
-            data.config?.leverage ? `${data.config.leverage}x` : '--';
+        // 配置信息（移除杠杆倍数展示）
+        // 交易周期：对齐最小交易间隔（秒）
+        const minIntervalSec = data.config?.min_trade_interval_seconds;
         document.getElementById('timeframe').textContent = 
-            data.config?.timeframe || '--';
+            (typeof minIntervalSec === 'number' && !isNaN(minIntervalSec)) ? `${minIntervalSec} 秒` : '--';
         document.getElementById('tradeMode').textContent = 
             data.config?.test_mode ? '模拟模式' : '实盘模式';
         // 头部 symbol
@@ -194,19 +242,28 @@ async function updateDashboard() {
             document.getElementById('unrealizedPnl').textContent = '--';
         }
         
-        // 绩效统计（总盈亏=已实现+未实现）
+        // 绩效统计（总盈亏=“多合约持仓管理”所有浮盈亏之和）
         const totalProfitEl = document.getElementById('totalProfit');
-        const realized = (typeof data.realized_profit_usdt === 'number') ? data.realized_profit_usdt : 0;
-        let unrealized = 0;
-        if (data.current_position && typeof data.current_position.unrealized_pnl === 'number') {
-            unrealized = data.current_position.unrealized_pnl;
+        try {
+            const ovResp = await fetch('/api/multi/overview');
+            const ov = await ovResp.json();
+            const items = ov?.items || [];
+            const totalUnreal = items.reduce((acc, it) => {
+                const pnl = (it && it.position && typeof it.position.unrealized_pnl === 'number') ? Number(it.position.unrealized_pnl) : 0;
+                return acc + pnl;
+            }, 0);
+            totalProfitEl.textContent = `$${totalUnreal.toFixed(2)}`;
+            totalProfitEl.className = `value pnl ${totalUnreal >= 0 ? 'positive' : 'negative'}`;
+        } catch (e) {
+            // 回退: 若多合约接口失败，显示当前持仓浮盈亏或0
+            let fallback = 0;
+            if (data.current_position && typeof data.current_position.unrealized_pnl === 'number') {
+                fallback = data.current_position.unrealized_pnl;
+            }
+            totalProfitEl.textContent = `$${fallback.toFixed(2)}`;
+            totalProfitEl.className = `value pnl ${fallback >= 0 ? 'positive' : 'negative'}`;
         }
-        const totalPnl = realized + unrealized;
-        totalProfitEl.textContent = `$${totalPnl.toFixed(2)}`;
-        totalProfitEl.className = `value pnl ${totalPnl >= 0 ? 'positive' : 'negative'}`;
         
-        document.getElementById('winRate').textContent = 
-            data.performance?.win_rate ? `${data.performance.win_rate.toFixed(1)}%` : '--';
         document.getElementById('totalTrades').textContent = 
             data.performance?.total_trades || '0';
         
@@ -370,7 +427,7 @@ async function updateKlineChart() {
 // 更新收益曲线图
 async function updateProfitChart() {
     try {
-        const response = await fetch('/api/profit_curve');
+        const response = await fetch('/api/profit_curve?limit=10000');
         const data = await response.json();
         
         if (!data || data.length === 0) {
@@ -523,6 +580,12 @@ async function updateAIDecisions() {
                 ${latest.timestamp}
             </div>
         `;
+        // 记录最近一次决策时间用于倒计时
+        const parsedTs = parseDecisionTimestamp(latest.timestamp);
+        if (!Number.isNaN(parsedTs)) {
+            lastDecisionAtMs = parsedTs;
+            updateNextDecisionCountdown();
+        }
         
         // 显示历史决策
         const historyDiv = document.getElementById('aiHistory');
@@ -551,7 +614,8 @@ async function updateAIDecisions() {
 // 更新交易记录
 async function updateTrades() {
     try {
-        const response = await fetch('/api/trades');
+        // 从后端日志读取最多10000条（由后端限制最大值）
+        const response = await fetch('/api/trades?limit=10000');
         const data = await response.json();
         
         const tbody = document.getElementById('tradesBody');
@@ -561,7 +625,8 @@ async function updateTrades() {
             return;
         }
         
-        const rows = data.slice(-20).reverse().map(trade => `
+        // 按时间倒序展示全部记录（最新在上）
+        const rows = data.slice().reverse().map(trade => `
             <tr>
                 <td>${trade.timestamp}${trade.symbol ? ` • ${trade.symbol}` : ''}</td>
                 <td><span class="signal-badge ${trade.signal}" style="font-size: 0.8em; padding: 4px 10px;">${trade.signal}</span></td>
@@ -596,8 +661,9 @@ async function updateMultiOverview() {
             const sizeText = pos?.size || '--';
             const entryText = pos?.entry_price ? `$${Number(pos.entry_price).toFixed(2)}` : '--';
             const pnlText = pos?.unrealized_pnl !== undefined ? `$${Number(pos.unrealized_pnl).toFixed(2)}` : '--';
-            const tpDefault = (it.tpsl_expected && it.tpsl_expected.tp != null) ? it.tpsl_expected.tp : '';
-            const slDefault = (it.tpsl_expected && it.tpsl_expected.sl != null) ? it.tpsl_expected.sl : '';
+            const levText = (pos && pos.leverage != null && !isNaN(Number(pos.leverage)))
+                ? `${Number(pos.leverage)}x`
+                : (it.leverage_cfg != null ? `${Number(it.leverage_cfg)}x` : '--');
             return `
             <tr>
                 <td>${it.symbol}</td>
@@ -606,16 +672,9 @@ async function updateMultiOverview() {
                 <td>${sizeText}</td>
                 <td>${entryText}</td>
                 <td>${pnlText}</td>
-                <td>
-                    <input type="number" step="0.01" placeholder="TP" style="width: 90px;" data-tp-for="${it.symbol}" value="${tpDefault}">
-                </td>
-                <td>
-                    <input type="number" step="0.01" placeholder="SL" style="width: 90px;" data-sl-for="${it.symbol}" value="${slDefault}">
-                </td>
-                <td>
-                    <button onclick="submitTPSL('${it.symbol}')">设置TP/SL</button>
-                    <button onclick="closePosition('${it.symbol}')">平仓</button>
-                </td>
+                <td>${levText}</td>
+                <td>${(it.tpsl_expected && it.tpsl_expected.tp != null) ? it.tpsl_expected.tp : '--'}</td>
+                <td>${(it.tpsl_expected && it.tpsl_expected.sl != null) ? it.tpsl_expected.sl : '--'}</td>
             </tr>`;
         }).join('');
         tbody.innerHTML = rows;
@@ -624,34 +683,6 @@ async function updateMultiOverview() {
     }
 }
 
-async function submitTPSL(symbol) {
-    try {
-        const tpInput = document.querySelector(`input[data-tp-for="${symbol}"]`);
-        const slInput = document.querySelector(`input[data-sl-for="${symbol}"]`);
-        const body = {
-            symbol,
-            take_profit: tpInput && tpInput.value ? Number(tpInput.value) : null,
-            stop_loss: slInput && slInput.value ? Number(slInput.value) : null
-        };
-        const resp = await fetch('/api/position/tpsl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-        const json = await resp.json();
-        if (!json.ok) throw new Error(json.error || '设置失败');
-        alert('已提交TP/SL设置');
-    } catch (e) {
-        alert('设置失败: ' + e.message);
-    }
-}
-
-async function closePosition(symbol) {
-    try {
-        const resp = await fetch('/api/position/close', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ symbol }) });
-        const json = await resp.json();
-        if (!json.ok) throw new Error(json.error || '平仓失败');
-        alert('已提交平仓订单');
-    } catch (e) {
-        alert('平仓失败: ' + e.message);
-    }
-}
 
 
 // 更新信号统计

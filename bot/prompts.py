@@ -3,7 +3,7 @@ import time
 import pandas as pd
 from datetime import datetime
 
-from .context import AI_PROVIDER, AI_MODEL, ai_client, TRADE_CONFIG
+from .context import AI_PROVIDER, AI_MODEL, ai_client, TRADE_CONFIG, get_symbol_leverage
 from . import state
 from .sentiment import get_sentiment_indicators
 from .okx import (
@@ -165,6 +165,23 @@ def analyze_with_deepseek(price_data):
                 f"- 阻力: {lv15.get('static_resistance',0):.2f} 支撑: {lv15.get('static_support',0):.2f}"
                 f"  (BOLL上: {lv15.get('bb_upper',0):.2f} 中: {lv15.get('bb_middle',0):.2f} 下: {lv15.get('bb_lower',0):.2f})\n"
             )
+        # 新增：斐波纳契与枢轴位简述
+        if price_data.get('levels_analysis'):
+            la = price_data['levels_analysis']
+            fib = la.get('fibonacci') or {}
+            piv = la.get('pivots') or {}
+            fib_text = ''
+            if fib:
+                fib_text = (f"23.6%:{fib.get('fib_23_6',0):.2f} 38.2%:{fib.get('fib_38_2',0):.2f} "
+                            f"50%:{fib.get('fib_50',0):.2f} 61.8%:{fib.get('fib_61_8',0):.2f} 78.6%:{fib.get('fib_78_6',0):.2f}")
+            piv_text = ''
+            if piv:
+                piv_text = (f"PP:{piv.get('pp',0):.2f} R1:{piv.get('r1',0):.2f} S1:{piv.get('s1',0):.2f} "
+                            f"R2:{piv.get('r2',0):.2f} S2:{piv.get('s2',0):.2f}")
+            if fib_text:
+                mtf_text += f"【斐波纳契回撤】{fib_text}\n"
+            if piv_text:
+                mtf_text += f"【枢轴位】{piv_text}\n"
     except Exception:
         pass
 
@@ -175,6 +192,12 @@ def analyze_with_deepseek(price_data):
     except Exception:
         symbol = 'BTC/USDT:USDT'
         base = 'BTC'
+
+    # 每币种杠杆基线（结合当前配置与历史经验）
+    try:
+        baseline_lev = int(get_symbol_leverage(symbol))
+    except Exception:
+        baseline_lev = int(TRADE_CONFIG.get('leverage', 10) or 10)
 
     prompt = f"""
     你是一个专业的加密货币交易分析师。请基于以下{symbol} {TRADE_CONFIG['timeframe']} 周期数据进行分析：
@@ -217,10 +240,17 @@ def analyze_with_deepseek(price_data):
     但是要注意鸡蛋不要放在一个篮子里，不要把所有仓位都放在一个方向上，要考虑风险分散。
     同时“贪多嚼不烂”，不要同时操作多个仓位，别人恐惧我贪婪，别人贪婪我恐惧。
 
+    【风险与杠杆提示】
+    - 基线杠杆建议: {baseline_lev}x（可根据波动率、趋势强度、信心度在合理范围内微调）
+    - 若波动扩大、流动性变差或信心降低，适当降低杠杆；反之可小幅提高
+    - 不可过度频繁变更杠杆，优先保持稳定的风险敞口
+
     【执行规则】
     - 若需要为“已有持仓”设置止盈/止损：如已存在同方向TP或SL，须先撤销旧单再设置新的TP/SL。
     - 如给出止盈/止损，请明确具体价格（美元），不要给相对百分比或范围。
     - 价格触发类型按 last 价格。
+    - 对于BTC和ETH，可适当提高杠杆，对于其他币种，可适当降低杠杆。
+    - 尽量设置止盈止损的时候，采用布林带上下轨作为参考、关键位、斐波纳契回撤位、支撑阻力位、移动平均线、相对价格等作为参考。
 
     请用以下 JSON 格式回复：
     {{
@@ -234,6 +264,7 @@ def analyze_with_deepseek(price_data):
         "trade_type": "LONG|SHORT|HOLD|ADD|REDUCE",
         "take_profit_price": 具体价格,（可选，如果take_profit的与当前未成交策略订单当中相等，则填充None，否则填写新价格take_profit）
         "stop_loss_price": 具体价格,（可选，注意stop_loss不同，如果stop_loss的与当前未成交策略订单当中相等，则填充None，否则填写新价格stop_loss）
+        "leverage": 整数，建议使用的杠杆（范围1-50；默认{baseline_lev}）
     }}
     """
 
@@ -341,6 +372,25 @@ def analyze_with_deepseek(price_data):
                     sd['confidence'] = 'MEDIUM'
             else:
                 sd['confidence'] = 'MEDIUM'
+
+            # 规范化杠杆字段（可选）
+            try:
+                lev = sd.get('leverage')
+                if lev is not None:
+                    lv = int(float(lev))
+                    if lv <= 0:
+                        raise ValueError('non-positive')
+                    # 合理范围裁剪（OKX大多数USDT永续支持到50x或更高，这里保守控制）
+                    lv = max(1, min(lv, 50))
+                    sd['leverage'] = lv
+                else:
+                    # 无提供时不写入，后续按映射/基线处理
+                    pass
+            except Exception:
+                try:
+                    del sd['leverage']
+                except Exception:
+                    pass
 
             signal_data = sd
         except Exception:

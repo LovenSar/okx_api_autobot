@@ -6,10 +6,33 @@ import requests
 import config
 from datetime import datetime
 
-from .context import exchange, TRADE_CONFIG, logger
+from .context import exchange, TRADE_CONFIG, logger, get_symbol_leverage
 from .state import ensure_symbol_bucket
 from .state import ACCOUNT_POS_MODE
 
+
+def _with_rate_limit_retry(callable_fn):
+    """调用OKX/CCXT接口，若命中限频(50011或"Too Many Requests")则等待5秒后重试一次。"""
+    try:
+        resp = callable_fn()
+        try:
+            if isinstance(resp, dict):
+                code = str(resp.get('code')) if 'code' in resp else None
+                msg = str(resp.get('msg') or '')
+                if code == '50011' or ('Too Many Requests' in msg):
+                    print('OKX限频(50011): 等待5秒后重试...')
+                    time.sleep(5)
+                    return callable_fn()
+        except Exception:
+            pass
+        return resp
+    except Exception as e:
+        em = str(e)
+        if ('Too Many Requests' in em) or ('50011' in em):
+            print('OKX限频异常(50011): 等待5秒后重试...')
+            time.sleep(5)
+            return callable_fn()
+        raise
 
 def _get_okx_inst_id() -> str:
     try:
@@ -148,11 +171,15 @@ def _okx_signed_post(path: str, body_obj) -> dict:
         }
 
         url = f"{base_url}{path}"
-        resp = requests.post(url, headers=headers, data=body_str, timeout=15)
-        try:
-            return resp.json()
-        except Exception:
-            return {'code': str(resp.status_code), 'msg': resp.text}
+        def _do_post():
+            r = requests.post(url, headers=headers, data=body_str, timeout=15)
+            try:
+                return r.json()
+            except Exception:
+                return {'code': str(r.status_code), 'msg': r.text}
+
+        resp_json = _with_rate_limit_retry(_do_post)
+        return resp_json
     except Exception as e:
         return {'code': 'error', 'msg': str(e)}
 
@@ -337,7 +364,7 @@ def get_open_orders_pending(limit: int = 20) -> list:
     try:
         inst_id = _get_okx_inst_id()
         params = {'instId': inst_id}
-        resp = exchange.privateGetTradeOrdersPending(params)
+        resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersPending(params))
         logger.debug(f"GET /api/v5/trade/orders-pending resp={resp}")
         data = resp.get('data') if isinstance(resp, dict) else None
         logger.debug(f"未成交普通订单 原始 data={data}")
@@ -369,7 +396,7 @@ def get_algo_orders_pending(limit: int = 20) -> list:
         inst_id = _get_okx_inst_id()
         params = {'instId': inst_id, 'ordType': 'conditional'}
         logger.debug(f"GET /api/v5/trade/orders-algo-pending params={params}")
-        resp = exchange.privateGetTradeOrdersAlgoPending(params)
+        resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersAlgoPending(params))
         logger.debug(f"GET /api/v5/trade/orders-algo-pending resp={resp}")
         data = resp.get('data') if isinstance(resp, dict) else None
         logger.debug(f"未成交策略订单 原始 data={data}")
@@ -402,7 +429,7 @@ def verify_tp_sl_against_pending(expected_tp: float = None, expected_sl: float =
     result = {'tp_match': None, 'sl_match': None}
     try:
         inst_id = _get_okx_inst_id()
-        resp = exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'})
+        resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'}))
         data = resp.get('data') if isinstance(resp, dict) else None
         if not data:
             return result
@@ -436,7 +463,7 @@ def deduplicate_pending_tpsl(side: str = None) -> dict:
     summary = {'cancelled': [], 'groups': {'tp': {}, 'sl': {}}}
     try:
         inst_id = _get_okx_inst_id()
-        resp = exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'})
+        resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'}))
         data = resp.get('data') if isinstance(resp, dict) else None
         if not data:
             return summary
@@ -561,7 +588,7 @@ def get_current_position():
             pos_ts = float(bucket.get('last_position_ts') or 0)
             if pos_cached and (_t.time() - pos_ts) < float(getattr(config, 'PRIVATE_UPDATE_INTERVAL_SECONDS', 60)):
                 return pos_cached
-        positions = exchange.fetch_positions([sym])
+        positions = _with_rate_limit_retry(lambda: exchange.fetch_positions([sym]))
         for pos in positions:
             if pos['symbol'] == sym:
                 contracts = float(pos['contracts']) if pos['contracts'] else 0
@@ -571,7 +598,7 @@ def get_current_position():
                         'size': contracts,
                         'entry_price': float(pos['entryPrice']) if pos['entryPrice'] else 0,
                         'unrealized_pnl': float(pos['unrealizedPnl']) if pos['unrealizedPnl'] else 0,
-                        'leverage': float(pos['leverage']) if pos['leverage'] else TRADE_CONFIG['leverage'],
+                        'leverage': float(pos['leverage']) if pos['leverage'] else float(get_symbol_leverage(sym)),
                         'symbol': pos['symbol']
                     }
                     if bucket is not None:
@@ -672,7 +699,7 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
             except Exception:
                 pass
             try:
-                exchange.privatePostTradeOrderAlgo({k: v for k, v in tp_req.items() if v is not None})
+                _with_rate_limit_retry(lambda: exchange.privatePostTradeOrderAlgo({k: v for k, v in tp_req.items() if v is not None}))
                 print(f"✓ 已提交持仓止盈设置: {tp_req}")
                 ok_any = True
             except Exception as e:
@@ -691,7 +718,7 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
             except Exception:
                 pass
             try:
-                exchange.privatePostTradeOrderAlgo({k: v for k, v in sl_req.items() if v is not None})
+                _with_rate_limit_retry(lambda: exchange.privatePostTradeOrderAlgo({k: v for k, v in sl_req.items() if v is not None}))
                 print(f"✓ 已提交持仓止损设置: {sl_req}")
                 ok_any = True
             except Exception as e:
@@ -703,14 +730,17 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
 
 def setup_exchange():
     try:
-        exchange.set_leverage(
-            TRADE_CONFIG['leverage'],
-            TRADE_CONFIG['symbol'],
-            {'mgnMode': 'cross'}
-        )
-        print(f"设置杠杆倍数: {TRADE_CONFIG['leverage']}x")
+        # 为当前激活符号设置杠杆（按每币种杠杆）
+        try:
+            sym = TRADE_CONFIG.get('symbol')
+        except Exception:
+            sym = None
+        if sym:
+            lev = int(get_symbol_leverage(sym))
+            exchange.set_leverage(lev, sym, {'mgnMode': 'cross'})
+            print(f"设置杠杆倍数: {sym} => {lev}x")
 
-        balance = exchange.fetch_balance()
+        balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
         usdt_balance = balance['USDT']['free']
         print(f"当前USDT余额: {usdt_balance:.2f}")
 
