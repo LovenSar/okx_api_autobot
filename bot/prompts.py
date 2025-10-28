@@ -226,7 +226,7 @@ def analyze_with_deepseek(price_data):
     {{
         "symbol": "{symbol}",
         "signal": "BUY|SELL|HOLD",
-        "reason": "说明为什么做出这个决定，建议做多还是做空，还是继续持仓，加仓还是减仓。",
+        "reason": "当前币种为{symbol}，说明为什么做出这个决定，建议做多还是做空，还是继续持仓，加仓还是减仓。",
         "stop_loss": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格）
         "take_profit": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格）
         "confidence": "HIGH|MEDIUM|LOW",

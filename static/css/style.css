@@ -328,6 +328,14 @@ body {
     align-items: stretch; /* 让两侧卡片等高 */
 }
 
+/* 统一底部两张卡片的高度，保证等高与更大的可滚动区域 */
+.bottom-section .card {
+    display: flex;
+    flex-direction: column;
+    height: min(72vh, 680px);
+    min-height: 520px; /* 确保有足够空间显示滚动区域 */
+}
+
 /* AI决策卡片 */
 .ai-latest {
     background: var(--bg-hover);
@@ -410,6 +418,24 @@ body {
 .ai-history {
     max-height: 300px;
     overflow-y: auto;
+}
+
+/* 让 AI 实时决策卡片与交易记录卡片等高，且历史滚动区尽可能大 */
+.ai-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.ai-card .card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+.ai-card .ai-history {
+    flex: 1;
+    overflow: auto;
+    max-height: none; /* 由父容器高度决定 */
 }
 
 .ai-history-item {
