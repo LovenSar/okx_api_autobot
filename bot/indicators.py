@@ -1,0 +1,218 @@
+import time
+from datetime import datetime
+import pandas as pd
+
+from .context import exchange, TRADE_CONFIG
+from . import state
+
+
+def calculate_technical_indicators(df):
+    try:
+        df['sma_5'] = df['close'].rolling(window=5, min_periods=1).mean()
+        df['sma_20'] = df['close'].rolling(window=20, min_periods=1).mean()
+        df['sma_50'] = df['close'].rolling(window=50, min_periods=1).mean()
+
+        df['ema_12'] = df['close'].ewm(span=12).mean()
+        df['ema_26'] = df['close'].ewm(span=26).mean()
+        df['macd'] = df['ema_12'] - df['ema_26']
+        df['macd_signal'] = df['macd'].ewm(span=9).mean()
+        df['macd_histogram'] = df['macd'] - df['macd_signal']
+
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+
+        df['bb_middle'] = df['close'].rolling(20).mean()
+        bb_std = df['close'].rolling(20).std()
+        df['bb_upper'] = df['bb_middle'] + (bb_std * 2)
+        df['bb_lower'] = df['bb_middle'] - (bb_std * 2)
+        df['bb_position'] = (df['close'] - df['bb_lower']) / (df['bb_upper'] - df['bb_lower'])
+
+        df['volume_ma'] = df['volume'].rolling(20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_ma']
+
+        df['resistance'] = df['high'].rolling(20).max()
+        df['support'] = df['low'].rolling(20).min()
+
+        df = df.bfill().ffill()
+        return df
+    except Exception as e:
+        print(f"技术指标计算失败: {e}")
+        return df
+
+
+def get_support_resistance_levels(df, lookback=20):
+    try:
+        recent_high = df['high'].tail(lookback).max()
+        recent_low = df['low'].tail(lookback).min()
+        current_price = df['close'].iloc[-1]
+        bb_upper = df['bb_upper'].iloc[-1]
+        bb_lower = df['bb_lower'].iloc[-1]
+        return {
+            'static_resistance': recent_high,
+            'static_support': recent_low,
+            'dynamic_resistance': bb_upper,
+            'dynamic_support': bb_lower,
+            'price_vs_resistance': ((recent_high - current_price) / current_price) * 100,
+            'price_vs_support': ((current_price - recent_low) / recent_low) * 100
+        }
+    except Exception as e:
+        print(f"支撑阻力计算失败: {e}")
+        return {}
+
+
+def get_market_trend(df):
+    try:
+        current_price = df['close'].iloc[-1]
+        trend_short = "上涨" if current_price > df['sma_20'].iloc[-1] else "下跌"
+        trend_medium = "上涨" if current_price > df['sma_50'].iloc[-1] else "下跌"
+        macd_trend = "bullish" if df['macd'].iloc[-1] > df['macd_signal'].iloc[-1] else "bearish"
+        if trend_short == "上涨" and trend_medium == "上涨":
+            overall_trend = "强势上涨"
+        elif trend_short == "下跌" and trend_medium == "下跌":
+            overall_trend = "强势下跌"
+        else:
+            overall_trend = "震荡整理"
+        return {
+            'short_term': trend_short,
+            'medium_term': trend_medium,
+            'macd': macd_trend,
+            'overall': overall_trend,
+            'rsi_level': df['rsi'].iloc[-1]
+        }
+    except Exception as e:
+        print(f"趋势分析失败: {e}")
+        return {}
+
+
+def get_btc_ohlcv_enhanced():
+    try:
+        now_ts = time.time()
+        if (state.last_price_data_cache is not None) and (now_ts - state.last_analysis_ts < float(state.ANALYSIS_UPDATE_INTERVAL or 0)):
+            try:
+                ohlcv_latest = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'], limit=1)
+                if ohlcv_latest and len(ohlcv_latest) > 0:
+                    state.last_price_data_cache['price'] = ohlcv_latest[0][4]
+                    state.last_price_data_cache['timestamp'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                pass
+            return state.last_price_data_cache
+
+        ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
+                                     limit=TRADE_CONFIG['data_points'])
+
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+        df = calculate_technical_indicators(df)
+
+        trend_4h = None
+        boll_4h = None
+        try:
+            ohlcv_4h = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120)
+            df4 = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df4['timestamp'] = pd.to_datetime(df4['timestamp'], unit='ms')
+            df4['bb_middle'] = df4['close'].rolling(20).mean()
+            bb4_std = df4['close'].rolling(20).std()
+            df4['bb_upper'] = df4['bb_middle'] + (bb4_std * 2)
+            df4['bb_lower'] = df4['bb_middle'] - (bb4_std * 2)
+            df4 = df4.bfill().ffill()
+            last4 = df4.iloc[-1]
+            price4 = float(last4['close'])
+            upper4 = float(last4['bb_upper'])
+            lower4 = float(last4['bb_lower'])
+            middle4 = float(last4['bb_middle'])
+            if price4 > middle4:
+                overall4 = '上涨'
+            elif price4 < middle4:
+                overall4 = '下跌'
+            else:
+                overall4 = '震荡'
+            pos4 = (price4 - lower4) / max((upper4 - lower4), 1e-9)
+            trend_4h = {
+                'overall': overall4,
+                'bb_position': pos4,
+                'price': price4
+            }
+            boll_4h = {
+                'bb_upper': upper4,
+                'bb_middle': middle4,
+                'bb_lower': lower4
+            }
+        except Exception:
+            trend_4h = None
+            boll_4h = None
+
+        levels_15m = None
+        kline_15m_data = None
+        try:
+            ohlcv_15m = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '15m', limit=96)
+            df15 = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df15['timestamp'] = pd.to_datetime(df15['timestamp'], unit='ms')
+            df15['bb_middle'] = df15['close'].rolling(20).mean()
+            bb15_std = df15['close'].rolling(20).std()
+            df15['bb_upper'] = df15['bb_middle'] + (bb15_std * 2)
+            df15['bb_lower'] = df15['bb_middle'] - (bb15_std * 2)
+            df15 = df15.bfill().ffill()
+            recent_high_15 = df15['high'].tail(20).max()
+            recent_low_15 = df15['low'].tail(20).min()
+            last15 = df15.iloc[-1]
+            levels_15m = {
+                'static_resistance': float(recent_high_15),
+                'static_support': float(recent_low_15),
+                'bb_upper': float(last15['bb_upper']),
+                'bb_middle': float(last15['bb_middle']),
+                'bb_lower': float(last15['bb_lower'])
+            }
+            kline_15m_data = df15[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records')
+        except Exception:
+            levels_15m = None
+            kline_15m_data = None
+
+        current_data = df.iloc[-1]
+        previous_data = df.iloc[-2]
+
+        trend_analysis = get_market_trend(df)
+        levels_analysis = get_support_resistance_levels(df)
+
+        result = {
+            'price': current_data['close'],
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'high': current_data['high'],
+            'low': current_data['low'],
+            'volume': current_data['volume'],
+            'timeframe': TRADE_CONFIG['timeframe'],
+            'price_change': ((current_data['close'] - previous_data['close']) / previous_data['close']) * 100,
+            'kline_data': df[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records'),
+            'technical_data': {
+                'sma_5': current_data.get('sma_5', 0),
+                'sma_20': current_data.get('sma_20', 0),
+                'sma_50': current_data.get('sma_50', 0),
+                'rsi': current_data.get('rsi', 0),
+                'macd': current_data.get('macd', 0),
+                'macd_signal': current_data.get('macd_signal', 0),
+                'macd_histogram': current_data.get('macd_histogram', 0),
+                'bb_upper': current_data.get('bb_upper', 0),
+                'bb_lower': current_data.get('bb_lower', 0),
+                'bb_position': current_data.get('bb_position', 0),
+                'volume_ratio': current_data.get('volume_ratio', 0)
+            },
+            'trend_analysis': trend_analysis,
+            'levels_analysis': levels_analysis,
+            'trend_4h': trend_4h,
+            'boll_4h': boll_4h,
+            'levels_15m': levels_15m,
+            'kline_15m_data': kline_15m_data,
+            'full_data': df
+        }
+
+        state.last_price_data_cache = result
+        state.last_analysis_ts = now_ts
+        return result
+    except Exception as e:
+        print(f"获取增强K线数据失败: {e}")
+        return None
+
+

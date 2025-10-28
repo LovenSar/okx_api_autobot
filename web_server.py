@@ -1,8 +1,10 @@
 from flask import Flask, jsonify, render_template, request
 from flask_cors import CORS
+import logging
 import threading
 import sys
 import os
+from werkzeug.serving import WSGIRequestHandler
 
 # 获取当前文件所在目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -17,6 +19,18 @@ app = Flask(__name__,
             template_folder=os.path.join(BASE_DIR, 'templates'),
             static_folder=os.path.join(BASE_DIR, 'static'))
 CORS(app)
+
+# 关闭默认的Werkzeug访问日志（保留>=WARNING级别的错误/告警）
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
+app.logger.setLevel(logging.WARNING)
+
+
+class _SilentRequestHandler(WSGIRequestHandler):
+    def log_request(self, code='-', size='-'):
+        pass
+
+    def log(self, type, message, *args):
+        pass
 
 @app.route('/')
 def index():
@@ -230,7 +244,8 @@ def initialize_data():
             deepseekok2.web_data['current_price'] = price_data['price']
             deepseekok2.web_data['current_position'] = deepseekok2.get_current_position()
             deepseekok2.web_data['kline_data'] = price_data['kline_data']
-            deepseekok2.web_data['last_update'] = deepseekok2.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            from datetime import datetime as _dt
+            deepseekok2.web_data['last_update'] = _dt.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 更新性能数据
             if deepseekok2.web_data['current_position']:
@@ -293,5 +308,5 @@ if __name__ == '__main__':
     print(f"📄 模板文件存在: {os.path.exists(os.path.join(app.template_folder, 'index.html'))}")
     print("="*60 + "\n")
     
-    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True)
+    app.run(host='0.0.0.0', port=PORT, debug=False, threaded=True, request_handler=_SilentRequestHandler)
 
