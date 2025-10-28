@@ -426,6 +426,24 @@ body {
     max-height: 400px;
 }
 
+/* 仅让“交易记录”卡片内的表格自适应填满并滚动 */
+.trades-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+}
+.trades-card .card-body {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0; /* 允许子元素在flex容器内正确收缩以启用滚动 */
+}
+.trades-card .trades-table {
+    flex: 1;
+    overflow: auto; /* 同时支持纵向滚动 */
+    max-height: none; /* 覆盖全局的固定高度限制 */
+}
+
 table {
     width: 100%;
     border-collapse: collapse;

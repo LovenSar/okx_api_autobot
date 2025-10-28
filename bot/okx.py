@@ -640,24 +640,10 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
             'reduceOnly': 'true',
         }
 
-        if tp_price is not None:
-            params['tpTriggerPx'] = _format_price_for_okx(tp_price)
-            if order_side == 'sell':
-                params['tpOrdPx'] = _format_price_for_okx(tp_price - (0.1))
-            else:
-                params['tpOrdPx'] = _format_price_for_okx(tp_price + (0.1))
-        if sl_price is not None:
-            params['slTriggerPx'] = _format_price_for_okx(sl_price)
-            if order_side == 'sell':
-                params['slOrdPx'] = _format_price_for_okx(sl_price - (0.1))
-            else:
-                params['slOrdPx'] = _format_price_for_okx(sl_price + (0.1))
-
-        try:
-            if ACCOUNT_POS_MODE == 'long_short' and pos_side in ('long', 'short'):
-                params['posSide'] = pos_side
-        except Exception:
-            pass
+        # 使用市场最小价格步长作为触发后委托价的微调
+        step, _ = _get_okx_price_tick_info()
+        if step <= 0:
+            step = 0.1
 
         pos_size_contracts = None
         try:
@@ -677,9 +663,14 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
             tp_req.update({
                 'ordType': 'conditional',
                 'tpTriggerPx': _format_price_for_okx(tp_price),
-                'tpOrdPx': _format_price_for_okx(tp_price - (0.1)),
+                'tpOrdPx': _format_price_for_okx(tp_price - step) if order_side == 'sell' else _format_price_for_okx(tp_price + step),
                 'tpTriggerPxType': 'last',
             })
+            try:
+                if ACCOUNT_POS_MODE == 'long_short' and pos_side in ('long', 'short'):
+                    tp_req['posSide'] = pos_side
+            except Exception:
+                pass
             try:
                 exchange.privatePostTradeOrderAlgo({k: v for k, v in tp_req.items() if v is not None})
                 print(f"✓ 已提交持仓止盈设置: {tp_req}")
@@ -691,9 +682,14 @@ def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, p
             sl_req.update({
                 'ordType': 'conditional',
                 'slTriggerPx': _format_price_for_okx(sl_price),
-                'slOrdPx': _format_price_for_okx(sl_price - (0.1)) if order_side == 'sell' else _format_price_for_okx(sl_price + (0.1)),
+                'slOrdPx': _format_price_for_okx(sl_price - step) if order_side == 'sell' else _format_price_for_okx(sl_price + step),
                 'slTriggerPxType': 'last',
             })
+            try:
+                if ACCOUNT_POS_MODE == 'long_short' and pos_side in ('long', 'short'):
+                    sl_req['posSide'] = pos_side
+            except Exception:
+                pass
             try:
                 exchange.privatePostTradeOrderAlgo({k: v for k, v in sl_req.items() if v is not None})
                 print(f"✓ 已提交持仓止损设置: {sl_req}")

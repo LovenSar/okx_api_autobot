@@ -77,7 +77,52 @@ def get_kline_data():
 def get_trade_history():
     """获取交易历史"""
     try:
-        return jsonify(deepseekok2.web_data['trade_history'])
+        # 支持通过文件尾部读取，limit 指定条数，默认100
+        limit = request.args.get('limit', default=100, type=int)
+        limit = max(1, min(limit, 10000))
+
+        items = []
+        # 优先从 trades.jsonl 读取
+        try:
+            if os.path.exists(TRADES_LOG_PATH):
+                with open(TRADES_LOG_PATH, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    buffer = bytearray()
+                    lines = []
+                    block_size = 4096
+                    pos = file_size
+                    while pos > 0 and len(lines) <= limit:
+                        read_size = block_size if pos >= block_size else pos
+                        pos -= read_size
+                        f.seek(pos)
+                        chunk = f.read(read_size)
+                        buffer[0:0] = chunk
+                        while True:
+                            newline_index = buffer.rfind(b'\n')
+                            if newline_index == -1:
+                                break
+                            line = buffer[newline_index+1:]
+                            buffer = buffer[:newline_index]
+                            if line.strip():
+                                lines.append(line)
+                            if len(lines) >= limit:
+                                break
+                    if len(lines) < limit and buffer.strip():
+                        lines.append(buffer)
+                lines = list(reversed(lines))
+                for b in lines:
+                    try:
+                        items.append(json.loads(b.decode('utf-8')))
+                    except Exception:
+                        continue
+        except Exception:
+            items = []
+
+        if not items:
+            items = deepseekok2.web_data['trade_history'][-limit:]
+
+        return jsonify(items)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
@@ -147,23 +192,64 @@ def get_ai_decisions():
 def get_signal_history():
     """获取信号历史统计"""
     try:
-        signals = deepseekok2.signal_history
-        
-        # 统计信号分布
+        # 历史聚合优先：从 ai_decisions.jsonl 统计，失败再回退内存
+        limit = request.args.get('limit', default=1000, type=int)
+        limit = max(1, min(limit, 20000))
+
+        records = []
+        log_path = getattr(deepseekok2, 'AI_DECISIONS_LOG_PATH', None)
+        if log_path and os.path.exists(log_path):
+            try:
+                with open(log_path, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    buffer = bytearray()
+                    lines = []
+                    block_size = 4096
+                    pos = file_size
+                    while pos > 0 and len(lines) <= limit:
+                        read_size = block_size if pos >= block_size else pos
+                        pos -= read_size
+                        f.seek(pos)
+                        chunk = f.read(read_size)
+                        buffer[0:0] = chunk
+                        while True:
+                            newline_index = buffer.rfind(b'\n')
+                            if newline_index == -1:
+                                break
+                            line = buffer[newline_index+1:]
+                            buffer = buffer[:newline_index]
+                            if line.strip():
+                                lines.append(line)
+                            if len(lines) >= limit:
+                                break
+                    if len(lines) < limit and buffer.strip():
+                        lines.append(buffer)
+                lines = list(reversed(lines))
+                for b in lines:
+                    try:
+                        records.append(json.loads(b.decode('utf-8')))
+                    except Exception:
+                        continue
+            except Exception:
+                records = []
+
+        if not records:
+            records = deepseekok2.signal_history[-limit:]
+
         signal_stats = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
         confidence_stats = {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
-        
-        for signal in signals:
-            signal_type = signal.get('signal', 'HOLD')
-            confidence = signal.get('confidence', 'LOW')
-            signal_stats[signal_type] = signal_stats.get(signal_type, 0) + 1
-            confidence_stats[confidence] = confidence_stats.get(confidence, 0) + 1
-        
+        for s in records:
+            st = s.get('signal', 'HOLD')
+            cf = s.get('confidence', 'LOW')
+            signal_stats[st] = signal_stats.get(st, 0) + 1
+            confidence_stats[cf] = confidence_stats.get(cf, 0) + 1
+
         return jsonify({
             'signal_stats': signal_stats,
             'confidence_stats': confidence_stats,
-            'total_signals': len(signals),
-            'recent_signals': signals[-10:] if signals else []
+            'total_signals': len(records),
+            'recent_signals': records[-10:] if records else []
         })
     except Exception as e:
         return jsonify({'error': str(e)}), 500
