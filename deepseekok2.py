@@ -128,7 +128,9 @@ web_data = {
     'performance': {
         'total_profit': 0,
         'win_rate': 0,
-        'total_trades': 0
+        'total_trades': 0,
+        'wins': 0,
+        'losses': 0
     },
     'kline_data': [],
     'profit_curve': [],  # 收益曲线数据
@@ -181,6 +183,87 @@ def save_realized_pnl() -> None:
             json.dump({'realized_profit_usdt': realized_profit_usdt}, f, ensure_ascii=False)
     except Exception:
         pass
+
+# 胜率统计（基于已实现盈亏减去阈值：BTC等值持仓量 * 1.5 USDT）
+def update_win_statistics(realized_pnl_usdt: float, size_contracts: float) -> None:
+    try:
+        ct_size_btc = get_contract_size_btc()
+        btc_equiv = float(size_contracts) * float(ct_size_btc)
+        threshold_usdt = btc_equiv * 1.5
+        perf = web_data.get('performance', {})
+        if realized_pnl_usdt - threshold_usdt > 0:
+            perf['wins'] = perf.get('wins', 0) + 1
+        else:
+            perf['losses'] = perf.get('losses', 0) + 1
+        total = perf.get('wins', 0) + perf.get('losses', 0)
+        perf['total_trades'] = total
+        perf['win_rate'] = (perf.get('wins', 0) / total * 100.0) if total > 0 else 0
+        web_data['performance'] = perf
+    except Exception:
+        pass
+
+def _get_okx_price_tick_info():
+    """从交易所元数据获取价格tick信息（步长与小数位）。"""
+    try:
+        market = exchange.market(TRADE_CONFIG['symbol'])
+        info = market.get('info', {}) if isinstance(market, dict) else {}
+        tick_sz_str = (info.get('tickSz') or info.get('tickSize') or '').strip()
+        if tick_sz_str:
+            try:
+                step = float(tick_sz_str)
+            except Exception:
+                step = 0.1
+            decimals = 0
+            if '.' in tick_sz_str:
+                decimals = len(tick_sz_str.split('.')[-1].rstrip('0'))
+            return step, max(decimals, 0)
+        # 回退使用ccxt的precision.price（表示小数位数）
+        precision = market.get('precision', {}) if isinstance(market, dict) else {}
+        dec = precision.get('price')
+        if isinstance(dec, int) and dec >= 0:
+            step = 10 ** (-dec) if dec <= 8 else 1e-8
+            return step, dec
+    except Exception:
+        pass
+    # 兜底：BTC合约通常tick不少于0.1
+    return 0.1, 1
+
+def _format_price_for_okx(px: float) -> str:
+    """将价格按tick步长四舍五入并格式化为字符串。"""
+    try:
+        step, decimals = _get_okx_price_tick_info()
+        if step <= 0:
+            step = 0.1
+            decimals = 1
+        # 四舍五入到最近的步长倍数
+        rounded = round(round(float(px) / step) * step, max(decimals, 0))
+        fmt = f"{{:.{max(decimals, 0)}f}}"
+        return fmt.format(rounded)
+    except Exception:
+        try:
+            return f"{float(px):.2f}"
+        except Exception:
+            return str(px)
+
+def build_okx_tp_sl_params(tp_price: float = None, sl_price: float = None) -> dict:
+    """根据OKX v5下单参数，构建附带止盈止损的参数。
+    - tpTriggerPx / slTriggerPx: 触发价格
+    - tpOrdPx / slOrdPx: 触发后委托价格，-1表示以市价成交
+    - tpTriggerPxType / slTriggerPxType: 触发价类型，默认last
+    """
+    params = {}
+    try:
+        if tp_price is not None:
+            params['tpTriggerPx'] = _format_price_for_okx(tp_price)
+            params['tpOrdPx'] = "-1"  # 市价触发
+            params['tpTriggerPxType'] = 'last'
+        if sl_price is not None:
+            params['slTriggerPx'] = _format_price_for_okx(sl_price)
+            params['slOrdPx'] = "-1"  # 市价触发
+            params['slTriggerPxType'] = 'last'
+    except Exception:
+        pass
+    return params
 
 # 初始余额（用于计算收益率）
 initial_balance = None
@@ -436,15 +519,84 @@ def get_btc_ohlcv_enhanced():
                 pass
             return last_price_data_cache
 
-        # 否则重新获取整套K线并计算指标
+        # 否则重新获取整套K线并计算指标（主周期）
         ohlcv = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], TRADE_CONFIG['timeframe'],
                                      limit=TRADE_CONFIG['data_points'])
 
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
-        # 计算技术指标
+        # 计算技术指标（主周期）
         df = calculate_technical_indicators(df)
+
+        # 计算4H BOLL用于大趋势判定
+        trend_4h = None
+        boll_4h = None
+        try:
+            ohlcv_4h = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120)
+            df4 = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df4['timestamp'] = pd.to_datetime(df4['timestamp'], unit='ms')
+            # BOLL(20) on 4H
+            df4['bb_middle'] = df4['close'].rolling(20).mean()
+            bb4_std = df4['close'].rolling(20).std()
+            df4['bb_upper'] = df4['bb_middle'] + (bb4_std * 2)
+            df4['bb_lower'] = df4['bb_middle'] - (bb4_std * 2)
+            df4 = df4.bfill().ffill()
+            last4 = df4.iloc[-1]
+            price4 = float(last4['close'])
+            upper4 = float(last4['bb_upper'])
+            lower4 = float(last4['bb_lower'])
+            middle4 = float(last4['bb_middle'])
+            # 趋势基于价位相对中轨
+            if price4 > middle4:
+                overall4 = '上涨'
+            elif price4 < middle4:
+                overall4 = '下跌'
+            else:
+                overall4 = '震荡'
+            # 4H位置百分比
+            pos4 = (price4 - lower4) / max((upper4 - lower4), 1e-9)
+            trend_4h = {
+                'overall': overall4,
+                'bb_position': pos4,
+                'price': price4
+            }
+            boll_4h = {
+                'bb_upper': upper4,
+                'bb_middle': middle4,
+                'bb_lower': lower4
+            }
+        except Exception:
+            trend_4h = None
+            boll_4h = None
+
+        # 15m数据用于择时与关键位
+        levels_15m = None
+        kline_15m_data = None
+        try:
+            ohlcv_15m = exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '15m', limit=96)
+            df15 = pd.DataFrame(ohlcv_15m, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df15['timestamp'] = pd.to_datetime(df15['timestamp'], unit='ms')
+            # 简要指标
+            df15['bb_middle'] = df15['close'].rolling(20).mean()
+            bb15_std = df15['close'].rolling(20).std()
+            df15['bb_upper'] = df15['bb_middle'] + (bb15_std * 2)
+            df15['bb_lower'] = df15['bb_middle'] - (bb15_std * 2)
+            df15 = df15.bfill().ffill()
+            recent_high_15 = df15['high'].tail(20).max()
+            recent_low_15 = df15['low'].tail(20).min()
+            last15 = df15.iloc[-1]
+            levels_15m = {
+                'static_resistance': float(recent_high_15),
+                'static_support': float(recent_low_15),
+                'bb_upper': float(last15['bb_upper']),
+                'bb_middle': float(last15['bb_middle']),
+                'bb_lower': float(last15['bb_lower'])
+            }
+            kline_15m_data = df15[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(10).to_dict('records')
+        except Exception:
+            levels_15m = None
+            kline_15m_data = None
 
         current_data = df.iloc[-1]
         previous_data = df.iloc[-2]
@@ -477,6 +629,10 @@ def get_btc_ohlcv_enhanced():
             },
             'trend_analysis': trend_analysis,
             'levels_analysis': levels_analysis,
+            'trend_4h': trend_4h,
+            'boll_4h': boll_4h,
+            'levels_15m': levels_15m,
+            'kline_15m_data': kline_15m_data,
             'full_data': df
         }
 
@@ -593,6 +749,24 @@ def safe_json_parse(json_str):
             return None
 
 
+def extract_error_info(error):
+    """从异常对象提取错误类型与错误码（若可用）。"""
+    try:
+        error_type = type(error).__name__
+        code = None
+        try:
+            code = getattr(error, 'code', None) or getattr(error, 'status_code', None) or getattr(error, 'http_status', None)
+            if code is None:
+                resp = getattr(error, 'response', None)
+                if resp is not None:
+                    code = getattr(resp, 'status_code', None) or getattr(resp, 'status', None)
+        except Exception:
+            pass
+        return error_type, code
+    except Exception:
+        return 'UnknownError', None
+
+
 def test_ai_connection():
     """测试AI模型连接状态"""
     global web_data
@@ -621,10 +795,14 @@ def test_ai_connection():
             return False
             
     except Exception as e:
+        err_type, err_code = extract_error_info(e)
         web_data['ai_model_info']['status'] = 'error'
         web_data['ai_model_info']['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         web_data['ai_model_info']['error_message'] = str(e)
-        print(f"❌ {AI_PROVIDER.upper()} 连接失败: {e}")
+        web_data['ai_model_info']['error_type'] = err_type
+        web_data['ai_model_info']['error_code'] = err_code
+        code_text = err_code if err_code is not None else 'N/A'
+        print(f"❌ {AI_PROVIDER.upper()} 连接失败: [{err_type} {code_text}] {e}")
         return False
 
 
@@ -675,6 +853,27 @@ def analyze_with_deepseek(price_data):
     position_text = "无持仓" if not current_pos else f"{current_pos['side']}仓, 数量: {current_pos['size']}, 盈亏: {current_pos['unrealized_pnl']:.2f}USDT"
     pnl_text = f", 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
 
+    # 多周期信息：4H趋势与15m关键位
+    mtf_text = ""
+    try:
+        if price_data.get('trend_4h') and price_data.get('boll_4h'):
+            t4 = price_data['trend_4h']
+            b4 = price_data['boll_4h']
+            mtf_text += (
+                f"【4H BOLL趋势】\n"
+                f"- 趋势: {t4.get('overall','N/A')}  位置: {t4.get('bb_position',0):.2%}\n"
+                f"- 上轨: {b4.get('bb_upper',0):.2f} 中轨: {b4.get('bb_middle',0):.2f} 下轨: {b4.get('bb_lower',0):.2f}\n"
+            )
+        if price_data.get('levels_15m'):
+            lv15 = price_data['levels_15m']
+            mtf_text += (
+                f"【15m关键位】\n"
+                f"- 阻力: {lv15.get('static_resistance',0):.2f} 支撑: {lv15.get('static_support',0):.2f}"
+                f"  (BOLL上: {lv15.get('bb_upper',0):.2f} 中: {lv15.get('bb_middle',0):.2f} 下: {lv15.get('bb_lower',0):.2f})\n"
+            )
+    except Exception:
+        pass
+
     prompt = f"""
     你是一个专业的加密货币交易分析师。请基于以下BTC/USDT {TRADE_CONFIG['timeframe']}周期数据进行分析：
 
@@ -686,6 +885,8 @@ def analyze_with_deepseek(price_data):
 
     {sentiment_text}  # 添加情绪分析
 
+    {mtf_text}
+
     【当前行情】
     - 当前价格: ${price_data['price']:,.2f}
     - 时间: {price_data['timestamp']}
@@ -695,31 +896,32 @@ def analyze_with_deepseek(price_data):
     - 价格变化: {price_data['price_change']:+.2f}%
     - 当前持仓: {position_text}{pnl_text}
 
-    【防频繁交易重要原则】
-    1. **趋势持续性优先**: 不要因单根K线或短期波动改变整体趋势判断
-    2. **持仓稳定性**: 除非趋势明确强烈反转，否则保持现有持仓方向
-    3. **反转确认**: 需要至少2-3个技术指标同时确认趋势反转才改变信号
-    4. **成本意识**: 减少不必要的仓位调整，每次交易都有成本
-    5. **仓位风险控制（必须考虑）**：单个方向的名义仓位价值不要超过总权益的50%。若连续加仓导致持仓名义价值超过50%，应给出“适当减仓（通常减当前仓位的50%）并锁定部分利润”的建议与理由。
-    6. 若价格快速拉升后出现动能减弱迹象，也需考虑减仓保利润。
-    7. 可以考虑适当的加仓，但不要超过总权益的50%。
+    【原则（4H判势 + 15m择时）】
+    1. 目标：平均每分钟寻找一次可交易机会，快速进出，追求小利润高频率的复利；多空对称，既可做多也可做空。
+    2. 大趋势（4H BOLL）：以4H中轨为趋势锚，价>中轨偏多，价<中轨偏空；尽量顺势，不逆大趋势。
+    3. 入场（15m）：在15m关键位（静态支撑/阻力与BOLL）附近等待微结构突破或回归信号择时。
+    4. 触发逻辑：请综合判断
+    - 最新价上破/下破最近3-5根K线的局部高/低点（微突破）
+    - 1-3分钟内的瞬时动量加速（MACD柱翻红/翻绿、RSI快速越界后回归）
+    - 贴近布林带外侧的快速回归/延伸
+    - 极短周期均线交叉（如 EMA12/EMA26 在1-3根内快速交叉）
 
-    【交易指导原则 - 必须遵守】
-    1. **技术分析主导** (权重60%)：趋势、支撑阻力、K线形态是主要依据
-    2. **市场情绪辅助** (权重30%)：情绪数据用于验证技术信号，不能单独作为交易理由  
-    - 情绪与技术同向 → 增强信号信心
-    - 情绪与技术背离 → 以技术分析为主，情绪仅作参考
-    - 情绪数据延迟 → 降低权重，以实时技术指标为准
-    3. **风险管理** (权重10%)：考虑持仓、盈亏状况和止损位置
-    4. **趋势跟随**: 明确趋势出现时立即行动，不要过度等待
-    5. 因为做的是btc，做多权重可以大一点点
-    6. **信号明确性**:
-    - 强势上涨趋势 → BUY信号
-    - 强势下跌趋势 → SELL信号  
-    - 仅在窄幅震荡、无明确方向时 → HOLD信号
-    7. **技术指标权重**:
-    - 趋势(均线排列) > RSI > MACD > 布林带
-    - 价格突破关键支撑/阻力位是重要信号
+    【信号判定 - 必须遵守（先看4H、再看15m）】
+    1. 4H方向优先：4H收盘价在BOLL中轨之上更偏BUY，在中轨之下更偏SELL；逆势仅在15m出现强信号时试探，且止损更紧。
+    2. 15m择时与关键位：结合15m静态支撑/阻力与BOLL做入场与减仓的触发参考。
+    3. 技术/微结构（权重50%）：局部高低点突破、动量加速、短均线结构
+    4. 流动性与成交量（权重30%）：量能放大优先，量缩不追
+    5. 指标快速信号（权重20%）：RSI极值回归、MACD柱翻转、布林带回归
+    6. 信号明确性：
+    - 动量向上且上破微结构 → BUY
+    - 动量向下且下破微结构 → SELL
+    - 无方向或波动极低/点差过大 → HOLD
+
+    【胜率统计口径】
+    - 采用已实现盈亏减去阈值后是否为正：profit_adj = realized_pnl_usdt - (btc_equiv * 1.5 USDT)
+    - 若 profit_adj > 0 计1次胜，否则计1次败；据此计算 win_rate
+    6. 保证胜率：基于已实现盈亏减去阈值：BTC等值持仓量 * 1.5 USDT
+    7. 可以做多，也可以做空，只要胜率大于50%即可；原则反向即可；不要局限只能做多，只要有正期望/胜率即可
 
     【当前技术状况分析】
     - 整体趋势: {price_data['trend_analysis'].get('overall', 'N/A')}
@@ -824,11 +1026,15 @@ def analyze_with_deepseek(price_data):
         return signal_data
 
     except Exception as e:
-        print(f"{AI_PROVIDER.upper()}分析失败: {e}")
+        err_type, err_code = extract_error_info(e)
+        code_text = err_code if err_code is not None else 'N/A'
+        print(f"{AI_PROVIDER.upper()}分析失败: [{err_type} {code_text}] {e}")
         # 更新AI连接状态
         web_data['ai_model_info']['status'] = 'error'
         web_data['ai_model_info']['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         web_data['ai_model_info']['error_message'] = str(e)
+        web_data['ai_model_info']['error_type'] = err_type
+        web_data['ai_model_info']['error_code'] = err_code
         return create_fallback_signal(price_data)
 
 
@@ -870,6 +1076,36 @@ def execute_trade(signal_data, price_data):
     except Exception as _:
         pass
 
+    # ⚖️ 极端偏向翻转：最近18次≥16次同向且无相反方向时尝试反向（不绕过最小交易间隔）
+    if not breakout_triggered:
+        try:
+            recent_signals = signal_history[-3:]
+            if recent_signals:
+                count_buy = sum(1 for s in recent_signals if s.get('signal') == 'BUY')
+                count_sell = sum(1 for s in recent_signals if s.get('signal') == 'SELL')
+                dominant = None
+                if count_buy >= 2 and count_sell == 0:
+                    dominant = 'BUY'
+                elif count_sell >= 2 and count_buy == 0:
+                    dominant = 'SELL'
+
+                if dominant is not None:
+                    target = 'SELL' if dominant == 'BUY' else 'BUY'
+                    if signal_data.get('signal') != target:
+                        print(f"⚖️ 极端偏向触发：最近3次中{dominant}≥2且无{'SELL' if dominant=='BUY' else 'BUY'} → 翻转为{target}（强制HIGH）")
+                        signal_data = dict(signal_data)
+                        signal_data['signal'] = target
+                        signal_data['confidence'] = 'HIGH'
+                        # 附加理由说明
+                        try:
+                            original_reason = str(signal_data.get('reason', '') or '')
+                            dom_count = count_buy if dominant == 'BUY' else count_sell
+                            signal_data['reason'] = f"{original_reason} | 极端偏向翻转: 最近3次{dominant}={dom_count}, 反向尝试{target}"
+                        except Exception:
+                            pass
+        except Exception as _:
+            pass
+
     # ⏰ 检查交易间隔（防止过于频繁交易），若刚发生突破触发则放行
     if not breakout_triggered and last_trade_time is not None:
         time_since_last_trade = (datetime.now() - last_trade_time).total_seconds()
@@ -889,18 +1125,10 @@ def execute_trade(signal_data, price_data):
         else:  # HOLD
             new_side = None
 
-        # 如果只是方向反转，需要高信心才执行
+        # 如果只是方向反转：允许HIGH置信度直接反转（不再要求连续确认）
         if new_side != current_side:
             if signal_data['confidence'] != 'HIGH':
                 print(f"🔒 非高信心反转信号，保持现有{current_side}仓")
-                return
-
-            # 新逻辑：要求连续出现N次（含当前）同向信号才允许反转
-            required = int(getattr(config, 'REVERSAL_CONFIRMATION_COUNT', 3))
-            recent = [s['signal'] for s in signal_history[-(required-1):]] if required > 1 else []
-            all_same = all(sig == signal_data['signal'] for sig in recent) if recent else True
-            if not all_same:
-                print(f"🔒 反转保护：未达到连续{required}次{signal_data['signal']}确认（当前仅{len(recent)+1}次），暂不反转")
                 return
 
     print(f"交易信号: {signal_data['signal']}")
@@ -951,6 +1179,13 @@ def execute_trade(signal_data, price_data):
             desired_contracts = max_contracts
 
         # 执行交易逻辑   tag 是我的经纪商api（不拿白不拿），不会影响大家返佣，介意可以删除
+        # 构建止盈止损参数（基于AI给定的价格）
+        try:
+            tp_price = signal_data.get('take_profit', None)
+            sl_price = signal_data.get('stop_loss', None)
+            tp_sl_params = build_okx_tp_sl_params(tp_price, sl_price)
+        except Exception:
+            tp_sl_params = {}
         if signal_data['signal'] == 'BUY':
             if current_position and current_position['side'] == 'short':
                 print("平空仓并开多仓...")
@@ -969,13 +1204,24 @@ def execute_trade(signal_data, price_data):
                 except Exception:
                     realized = 0.0
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=current_position['size'], params=params)
+                # 胜率统计（基于本次平仓的已实现盈亏）
+                try:
+                    update_win_statistics(realized, size_contracts)
+                except Exception:
+                    pass
                 time.sleep(1)
                 # 开多仓（将BTC数量换算为合约张数下单）
                 long_size = desired_contracts
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=params)
+                # 合并止盈止损
+                try:
+                    p2 = dict(params)
+                    p2.update(tp_sl_params)
+                except Exception:
+                    p2 = params
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=p2)
                 # 累计已实现盈亏
                 realized_profit_usdt += realized
                 save_realized_pnl()
@@ -996,7 +1242,13 @@ def execute_trade(signal_data, price_data):
                                     params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                                     if ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'long'
-                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=add_contracts, params=params)
+                                    # 合并止盈止损
+                                    try:
+                                        p3 = dict(params)
+                                        p3.update(tp_sl_params)
+                                    except Exception:
+                                        p3 = params
+                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=add_contracts, params=p3)
                                     pyramid_adds_long += 1
                                     last_pyramid_ts = now_ts
                                     print(f"连涨加仓完成，累计加仓次数(long)={pyramid_adds_long}")
@@ -1016,7 +1268,13 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=params)
+                # 合并止盈止损
+                try:
+                    p1 = dict(params)
+                    p1.update(tp_sl_params)
+                except Exception:
+                    p1 = params
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=p1)
 
         elif signal_data['signal'] == 'SELL':
             if current_position and current_position['side'] == 'long':
@@ -1036,13 +1294,24 @@ def execute_trade(signal_data, price_data):
                 except Exception:
                     realized = 0.0
                 exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=current_position['size'], params=params)
+                # 胜率统计（基于本次平仓的已实现盈亏）
+                try:
+                    update_win_statistics(realized, size_contracts)
+                except Exception:
+                    pass
                 time.sleep(1)
                 # 开空仓（将BTC数量换算为合约张数下单）
                 short_size = desired_contracts
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=params)
+                # 合并止盈止损
+                try:
+                    p4 = dict(params)
+                    p4.update(tp_sl_params)
+                except Exception:
+                    p4 = params
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=p4)
                 # 累计已实现盈亏
                 realized_profit_usdt += realized
                 save_realized_pnl()
@@ -1063,7 +1332,13 @@ def execute_trade(signal_data, price_data):
                                     params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                                     if ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'short'
-                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=add_contracts, params=params)
+                                    # 合并止盈止损
+                                    try:
+                                        p5 = dict(params)
+                                        p5.update(tp_sl_params)
+                                    except Exception:
+                                        p5 = params
+                                    exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=add_contracts, params=p5)
                                     pyramid_adds_short += 1
                                     last_pyramid_ts = now_ts
                                     print(f"连跌加仓完成，累计加仓次数(short)={pyramid_adds_short}")
@@ -1083,7 +1358,13 @@ def execute_trade(signal_data, price_data):
                 params = {'tdMode': 'cross', 'tag': '60bb4a8d3416BCDE'}
                 if ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
-                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=params)
+                # 合并止盈止损
+                try:
+                    p6 = dict(params)
+                    p6.update(tp_sl_params)
+                except Exception:
+                    p6 = params
+                exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=p6)
 
         print("订单执行成功")
         

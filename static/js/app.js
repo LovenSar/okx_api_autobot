@@ -92,11 +92,17 @@ async function updateAIModelInfo() {
             statusText.style.color = 'var(--success-color)';
         } else if (data.status === 'error') {
             statusDot.classList.add('error');
-            statusText.textContent = '连接失败';
+            const codeText = (data.error_code !== undefined && data.error_code !== null) ? String(data.error_code) : 'N/A';
+            const typeText = data.error_type || 'Error';
+            // 在状态文本中直接体现报错码/类型
+            statusText.textContent = codeText !== 'N/A' ? `连接失败 (${typeText} ${codeText})` : `连接失败 (${typeText})`;
             statusText.style.color = 'var(--danger-color)';
-            if (data.error_message) {
-                statusText.title = data.error_message; // 鼠标悬停显示错误信息
-            }
+            // 详细信息放入提示（tooltip）
+            const tooltipParts = [];
+            if (data.error_message) tooltipParts.push(data.error_message);
+            tooltipParts.push(`类型: ${typeText}`);
+            tooltipParts.push(`代码: ${codeText}`);
+            statusText.title = tooltipParts.join(' | ');
         } else {
             statusDot.classList.add('unknown');
             statusText.textContent = '检测中';
