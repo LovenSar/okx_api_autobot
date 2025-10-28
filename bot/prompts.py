@@ -231,6 +231,9 @@ def analyze_with_deepseek(price_data):
     - 短期趋势 (15m): {price_data['trend_analysis'].get('short_term', 'N/A')}
     - RSI (15m): {price_data['technical_data'].get('rsi', 0):.1f} ({'超买' if price_data['technical_data'].get('rsi', 0) > 70 else '超卖' if price_data['technical_data'].get('rsi', 0) < 30 else '中性'})
     - MACD 方向 (15m): {price_data['trend_analysis'].get('macd', 'N/A')}
+    - 布林带位置 (4H): {price_data['boll_4h'].get('bb_position', 0):.2%} ({'上部' if price_data['boll_4h'].get('bb_position', 0) > 0.7 else '下部' if price_data['boll_4h'].get('bb_position', 0) < 0.3 else '中部'})
+    - 斐波纳契回撤 (15m): {price_data['levels_analysis'].get('fibonacci', {}).get('fib_23_6', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_38_2', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_50', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_61_8', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_78_6', 0):.2f}
+    - 枢轴位 (15m): {price_data['levels_analysis'].get('pivots', {}).get('pp', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r2', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s2', 0):.2f}
 
     【前两次AI原始回复（供一致性参考）】
     {prev_ai_raw}

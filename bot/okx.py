@@ -12,7 +12,7 @@ from .state import ACCOUNT_POS_MODE
 
 
 def _with_rate_limit_retry(callable_fn):
-    """调用OKX/CCXT接口，若命中限频(50011或"Too Many Requests")则等待5秒后重试一次。"""
+    """调用OKX/CCXT接口，若命中限频(50011或"Too Many Requests")则等待30秒后重试一次。"""
     try:
         resp = callable_fn()
         try:
@@ -20,8 +20,8 @@ def _with_rate_limit_retry(callable_fn):
                 code = str(resp.get('code')) if 'code' in resp else None
                 msg = str(resp.get('msg') or '')
                 if code == '50011' or ('Too Many Requests' in msg):
-                    print('OKX限频(50011): 等待5秒后重试...')
-                    time.sleep(5)
+                    print('OKX限频(50011): 等待30秒后重试...')
+                    time.sleep(30)
                     return callable_fn()
         except Exception:
             pass
@@ -29,8 +29,8 @@ def _with_rate_limit_retry(callable_fn):
     except Exception as e:
         em = str(e)
         if ('Too Many Requests' in em) or ('50011' in em):
-            print('OKX限频异常(50011): 等待5秒后重试...')
-            time.sleep(5)
+            print('OKX限频异常(50011): 等待30秒后重试...')
+            time.sleep(30)
             return callable_fn()
         raise
 
@@ -532,7 +532,7 @@ def cancel_existing_tpsl_for_position(pos_side: str = None) -> dict:
         if not pos_side:
             return result
         inst_id = _get_okx_inst_id()
-        resp = exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'})
+        resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'}))
         data = resp.get('data') if isinstance(resp, dict) else None
         if not data:
             return result
@@ -563,7 +563,7 @@ def cancel_existing_tpsl_for_position(pos_side: str = None) -> dict:
                 result['count'] = len(result['cancelled'])
             except Exception:
                 try:
-                    exchange.privatePostTradeCancelAlgos({'algoId': ids, 'instId': inst_id})
+                    _with_rate_limit_retry(lambda: exchange.privatePostTradeCancelAlgos({'algoId': ids, 'instId': inst_id}))
                     result['cancelled'] = ids
                     result['count'] = len(ids)
                 except Exception:
@@ -737,7 +737,7 @@ def setup_exchange():
             sym = None
         if sym:
             lev = int(get_symbol_leverage(sym))
-            exchange.set_leverage(lev, sym, {'mgnMode': 'cross'})
+            _with_rate_limit_retry(lambda: exchange.set_leverage(lev, sym, {'mgnMode': 'cross'}))
             print(f"设置杠杆倍数: {sym} => {lev}x")
 
         balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
@@ -745,7 +745,7 @@ def setup_exchange():
         print(f"当前USDT余额: {usdt_balance:.2f}")
 
         try:
-            cfg = exchange.privateGetAccountConfig()
+            cfg = _with_rate_limit_retry(lambda: exchange.privateGetAccountConfig())
             data = (cfg.get('data') or [{}])[0]
             pos_mode_api = (data.get('posMode') or '').lower()
             from .state import ACCOUNT_POS_MODE as _MODE
