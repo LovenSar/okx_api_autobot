@@ -31,7 +31,7 @@ else:
         api_key=os.getenv('DEEPSEEK_API_KEY'),
         base_url="https://api.deepseek.com"
     )
-    AI_MODEL = "deepseek-chat"
+    AI_MODEL = "deepseek-reasoner"
     print(f"使用AI模型: DeepSeek {AI_MODEL}")
 
 # 保持向后兼容
@@ -875,7 +875,7 @@ def analyze_with_deepseek(price_data):
         pass
 
     prompt = f"""
-    你是一个专业的加密货币交易分析师。请基于以下BTC/USDT {TRADE_CONFIG['timeframe']}周期数据进行分析：
+    你是一个专业的加密货币交易分析师。请基于以下BTC/USDT {TRADE_CONFIG['timeframe']} 周期数据进行分析：
 
     {kline_text}
 
@@ -883,9 +883,9 @@ def analyze_with_deepseek(price_data):
 
     {signal_text}
 
-    {sentiment_text}  # 添加情绪分析
+    {sentiment_text}  # 情绪分析（如有）
 
-    {mtf_text}
+    {mtf_text}  # 多周期补充（如有）
 
     【当前行情】
     - 当前价格: ${price_data['price']:,.2f}
@@ -896,52 +896,72 @@ def analyze_with_deepseek(price_data):
     - 价格变化: {price_data['price_change']:+.2f}%
     - 当前持仓: {position_text}{pnl_text}
 
-    【原则（4H判势 + 15m择时）】
-    1. 目标：平均每分钟寻找一次可交易机会，快速进出，追求小利润高频率的复利；多空对称，既可做多也可做空。
-    2. 大趋势（4H BOLL）：以4H中轨为趋势锚，价>中轨偏多，价<中轨偏空；尽量顺势，不逆大趋势。
-    3. 入场（15m）：在15m关键位（静态支撑/阻力与BOLL）附近等待微结构突破或回归信号择时。
-    4. 触发逻辑：请综合判断
-    - 最新价上破/下破最近3-5根K线的局部高/低点（微突破）
-    - 1-3分钟内的瞬时动量加速（MACD柱翻红/翻绿、RSI快速越界后回归）
-    - 贴近布林带外侧的快速回归/延伸
-    - 极短周期均线交叉（如 EMA12/EMA26 在1-3根内快速交叉）
+    【融合交易策略 — 趋势为纲，波动为机】
+    1) 核心框架：4H 判势，15m 择时，1–5m 精细入场（可选）。
+    2) 趋势锚点（4H）：以 BOLL 中轨或 EMA(50) 为主趋势锚。
+    - 收盘价 > 中轨：偏多；收盘价 < 中轨：偏空；尽量顺势。
+    3) 择时（15m）：在静态支撑/阻力与 BOLL 附近等待微结构触发（突破/回归）。
+    4) 精入场（1–5m，可选）：在已选交易区域内用更短周期做触发确认。
+    5) 动态频率：强趋势可 2–5 次/小时；震荡期显著降频，优先 HOLD，避免过度交易。
 
-    【信号判定 - 必须遵守（先看4H、再看15m）】
-    1. 4H方向优先：4H收盘价在BOLL中轨之上更偏BUY，在中轨之下更偏SELL；逆势仅在15m出现强信号时试探，且止损更紧。
-    2. 15m择时与关键位：结合15m静态支撑/阻力与BOLL做入场与减仓的触发参考。
-    3. 技术/微结构（权重50%）：局部高低点突破、动量加速、短均线结构
-    4. 流动性与成交量（权重30%）：量能放大优先，量缩不追
-    5. 指标快速信号（权重20%）：RSI极值回归、MACD柱翻转、布林带回归
-    6. 信号明确性：
-    - 动量向上且上破微结构 → BUY
-    - 动量向下且下破微结构 → SELL
-    - 无方向或波动极低/点差过大 → HOLD
+    【信号触发（至少满足两项，共振更佳）】
+    - 微结构：上/下破最近 3–5 根 K 线局部高/低点（有效性需 15m 收盘确认）。
+    - 动量：1–3 分钟内 MACD 柱放大或 RSI 极值后快速回归/上穿下破 50 线。
+    - 布林：贴近外轨后的有效回归或顺势延伸。
+    - 短均线：EMA12/EMA26 在 1–3 根内快速同向交叉，方向与 4H 一致。
+    - 量能：突破/破位伴随放量；无量突破视为弱信号。
 
-    【胜率统计口径】
-    - 采用已实现盈亏减去阈值后是否为正：profit_adj = realized_pnl_usdt - (btc_equiv * 1.5 USDT)
-    - 若 profit_adj > 0 计1次胜，否则计1次败；据此计算 win_rate
-    6. 保证胜率：基于已实现盈亏减去阈值：BTC等值持仓量 * 1.5 USDT
-    7. 可以做多，也可以做空，只要胜率大于50%即可；原则反向即可；不要局限只能做多，只要有正期望/胜率即可
+    【权重与判定框架】
+    - 趋势一致性（4H vs 15m）：40%
+    - 技术微结构与动量：30%
+    - 成交量与流动性：20%
+    - 情绪与其他快速指标（RSI/MACD/BOLL回归）：10%（仅调节信心，不独立触发）
 
-    【当前技术状况分析】
-    - 整体趋势: {price_data['trend_analysis'].get('overall', 'N/A')}
-    - 短期趋势: {price_data['trend_analysis'].get('short_term', 'N/A')} 
-    - RSI状态: {price_data['technical_data'].get('rsi', 0):.1f} ({'超买' if price_data['technical_data'].get('rsi', 0) > 70 else '超卖' if price_data['technical_data'].get('rsi', 0) < 30 else '中性'})
-    - MACD方向: {price_data['trend_analysis'].get('macd', 'N/A')}
+    【防过度交易与反转确认】
+    - 冷静期：换向后 2–3 根 15m 内不二次反手。
+    - 反转门槛：至少 2 个时间框架（例如 4H 与 15m）同时出现反转证据，且量能配合。
+    - 最小间隔：同方向重复入场至少间隔 15 分钟。
+    - 成本门槛：仅在预期收益显著覆盖手续费与滑点时执行。
+
+    【风险管理与出入场】
+    - 最小盈亏比（RR）≥ 1.2（趋势强时 ≥ 1.5 更佳）。
+    - 止损优先放在最近摆动点外、或 BOLL 外轨外、或基于 ATR 的安全边际。
+    - 分批止盈：到达关键位/中轨回撤/动量衰减时逐步减仓；保留尾仓以博趋势延伸。
+    - 流动性：量缩不追；点差/冲击成本偏高或波动极低时倾向 HOLD。
+
+    【胜率与成本口径】
+    - 成本模型：profit_adj = realized_pnl_usdt - notional_usdt * roundtrip_fee_rate - slippage_usdt_est
+    - 若无法精确估算，则回退：profit_adj = realized_pnl_usdt - (btc_equiv * 1.5 USDT)
+    - 统计胜率：profit_adj > 0 计 1 胜，否则计 1 败；据此计算 win_rate
+    - 仅在“预期收益为正 且 历史 win_rate > 50%”的设置下发出 BUY/SELL，否则倾向 HOLD
+
+    【具体信号标准】
+    - BUY：4H 偏多 + 15m 支撑区或回调位出现触发共振 + 放量/动量确认；1–5m 可用于更精细确认。
+    - SELL：4H 偏空 + 15m 阻力区或反弹位出现触发共振 + 放量/动量确认；1–5m 可用于更精细确认。
+    - HOLD（任一情况满足则 HOLD）：
+    ① 4H 趋势与 15m 信号冲突；② 处于区间中部且无量能支持；
+    ③ 波动率过低或点差成本过高；④ 缺乏至少两项共振。
+
+    【当前技术状况总览】
+    - 整体趋势 (4H): {price_data['trend_analysis'].get('overall', 'N/A')}
+    - 短期趋势 (15m): {price_data['trend_analysis'].get('short_term', 'N/A')}
+    - RSI (15m): {price_data['technical_data'].get('rsi', 0):.1f} ({'超买' if price_data['technical_data'].get('rsi', 0) > 70 else '超卖' if price_data['technical_data'].get('rsi', 0) < 30 else '中性'})
+    - MACD 方向 (15m): {price_data['trend_analysis'].get('macd', 'N/A')}
+    - 多周期协调性：请评估 4H/15m/当前执行周期的一致性与背离。
 
     【分析要求】
-    基于以上分析，请给出明确的交易信号
+    请依据以上流程与约束，综合趋势、关键位、动量与量能，并结合情绪作信心校正，给出明确交易指令。
 
-    请用以下JSON格式回复：
+    请用以下 JSON 格式回复：
     {{
         "signal": "BUY|SELL|HOLD",
-        "reason": "简要分析理由(包含趋势判断和技术依据)",
+        "reason": "必须包含4H趋势 + 15m择时与触发细节，说明量能/情绪是否同向",
         "stop_loss": 具体价格,
-        "take_profit": 具体价格, 
-        "confidence": "HIGH|MEDIUM|LOW"
+        "take_profit": 具体价格,
+        "confidence": "HIGH|MEDIUM|LOW",
+        "position_size": "REDUCED|NORMAL|AGGRESSIVE"
     }}
     """
-
     try:
         print(f"⏳ 正在调用{AI_PROVIDER.upper()} API ({AI_MODEL})...")
         # 允许通过环境变量覆盖模型名称（避免硬编码）
