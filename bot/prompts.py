@@ -15,8 +15,10 @@ from .okx import (
     format_open_orders_for_prompt,
     format_algo_orders_for_prompt,
     _parse_price_value,
+    get_open_interest_snapshot,
+    get_current_funding_rate,
 )
-from .utils import safe_json_parse, extract_error_info
+from .utils import safe_json_parse, extract_error_info, append_prompt_to_file
 
 
 def _extract_ai_content(resp):
@@ -204,6 +206,89 @@ def create_fallback_signal(price_data):
 
 
 def analyze_with_deepseek(price_data):
+    def _fmt_number(val, default_str='N/A', precision=4):
+        try:
+            if val is None:
+                return default_str
+            f = float(val)
+            fmt = f"{{:.{precision}f}}"
+            return fmt.format(f)
+        except Exception:
+            return default_str
+
+    def _fmt_list(lst, precision=4):
+        try:
+            if not lst:
+                return "[]"
+            fmt = f"{{:.{precision}f}}"
+            return "[" + ", ".join(fmt.format(float(x)) for x in lst if x is not None) + "]"
+        except Exception:
+            try:
+                return "[" + ", ".join(str(x) for x in (lst or [])) + "]"
+            except Exception:
+                return "[]"
+
+    def build_structured_snapshot_prompt(pd_obj):
+        tech = pd_obj.get('technical_data') or {}
+        series = pd_obj.get('intraday_series') or {}
+        bg4 = pd_obj.get('background_4h') or {}
+        # 衍生品市场情绪（尽最大努力获取，失败回退 N/A）
+        oi_latest = None
+        oi_avg = None
+        frate = None
+        try:
+            oi = get_open_interest_snapshot() or {}
+            oi_latest = oi.get('latest')
+        except Exception:
+            pass
+        try:
+            fr = get_current_funding_rate() or {}
+            frate = fr.get('rate')
+        except Exception:
+            pass
+
+        part1 = (
+            "第一部分：当前实时快照\n\n"
+            f"当前价格： {pd_obj.get('price')}\n\n"
+            f"20周期指数移动平均线： { _fmt_number(tech.get('ema_20'), precision=6)}\n\n"
+            f"移动平均收敛散度： { _fmt_number(tech.get('macd'), precision=6)}\n\n"
+            f"7周期相对强弱指数： { _fmt_number(tech.get('rsi_7'), precision=2)}\n\n"
+        )
+
+        part2 = (
+            "第二部分：衍生品市场情绪\n\n"
+            "未平仓合约：\n\n"
+            f"最新值：{ _fmt_number(oi_latest, precision=0)}\n\n"
+            f"平均值：{ _fmt_number(oi_avg, precision=0)}\n\n"
+            f"资金费率： { _fmt_number(frate, precision=6)}\n\n"
+        )
+
+        part3 = (
+            "第三部分：短期日内动态（每分钟，最旧 → 最新）\n\n"
+            f"中间价序列： {_fmt_list(series.get('mid_prices'), precision=6)}\n\n"
+            f"EMA指标（20周期）序列： {_fmt_list(series.get('ema20'), precision=6)}\n\n"
+            f"MACD指标序列： {_fmt_list(series.get('macd'), precision=6)}\n\n"
+            f"RSI指标（7周期）序列： {_fmt_list(series.get('rsi7'), precision=2)}\n\n"
+            f"RSI指标（14周期）序列： {_fmt_list(series.get('rsi14'), precision=2)}\n\n"
+        )
+
+        part4 = (
+            "第四部分：长期背景框架（基于4小时图）\n\n"
+            "趋势对比：\n\n"
+            f"20周期EMA： { _fmt_number(bg4.get('ema20'), precision=6)}\n\n"
+            f"50周期EMA： { _fmt_number(bg4.get('ema50'), precision=6)}\n\n"
+            "波动率对比（平均真实波幅）：\n\n"
+            f"3周期ATR： { _fmt_number(bg4.get('atr3'), precision=6)}\n\n"
+            f"14周期ATR： { _fmt_number(bg4.get('atr14'), precision=6)}\n\n"
+            "成交量对比：\n\n"
+            f"当前成交量： { _fmt_number(bg4.get('volume_current'), precision=0)}\n\n"
+            f"平均成交量： { _fmt_number(bg4.get('volume_avg'), precision=0)}\n\n"
+            f"MACD指标序列（4小时）： {_fmt_list(bg4.get('macd_series'), precision=6)}\n\n"
+            f"RSI指标（14周期）序列（4小时）： {_fmt_list(bg4.get('rsi14_series'), precision=2)}\n\n"
+        )
+
+        return part1 + part2 + part3 + part4
+
     technical_analysis = generate_technical_analysis_text(price_data)
     kline_text = f"【最近5根{TRADE_CONFIG['timeframe']}K线数据】\n"
     for i, kline in enumerate(price_data['kline_data'][-5:]):
@@ -297,8 +382,12 @@ def analyze_with_deepseek(price_data):
     except Exception:
         baseline_lev = int(TRADE_CONFIG.get('leverage', 10) or 10)
 
+    structured_snapshot = build_structured_snapshot_prompt(price_data)
+
     prompt = f"""
     你是一个专业的加密货币交易分析师。请基于以下{symbol} {TRADE_CONFIG['timeframe']} 周期数据进行分析：
+
+    {structured_snapshot}
 
     {kline_text}
 
@@ -459,6 +548,18 @@ ETH买入价3,000，止损2,800（风险$200）
         "leverage": 整数，建议使用的杠杆（范围1-50；默认{baseline_lev}）
     }}
     """
+
+    # 写入 prompts.jsonl 记录
+    try:
+        append_prompt_to_file({
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': symbol,
+            'timeframe': TRADE_CONFIG['timeframe'],
+            'structured_snapshot': structured_snapshot,
+            'full_prompt': prompt
+        })
+    except Exception:
+        pass
 
     try:
         print(f"⏳ 正在调用{AI_PROVIDER.upper()} API ({AI_MODEL})...")

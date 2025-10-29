@@ -134,6 +134,86 @@ def _get_okx_inst_id() -> str:
     except Exception:
         pass
     return TRADE_CONFIG['symbol'].replace('/', '-').replace(':USDT', '-SWAP')
+def _okx_public_get(path: str, params: dict = None) -> dict:
+    try:
+        host = None
+        try:
+            host = getattr(exchange, 'hostname', None) or exchange.urls.get('hostname')
+        except Exception:
+            host = None
+        if not host or '{' in str(host):
+            host = 'www.okx.com'
+        base_url = f"https://{host}"
+        url = f"{base_url}{path}"
+
+        def _do_get():
+            r = requests.get(url, params=params or {}, timeout=15)
+            try:
+                return r.json()
+            except Exception:
+                return {'code': str(r.status_code), 'msg': r.text}
+
+        resp_json = _with_rate_limit_retry(_do_get)
+        return resp_json
+    except Exception as e:
+        return {'code': 'error', 'msg': str(e)}
+
+
+def get_open_interest_snapshot() -> dict:
+    """获取未平仓合约（OI）快照。返回 {latest, ts}，失败返回空字典。"""
+    try:
+        inst_id = _get_okx_inst_id()
+        resp = _okx_public_get('/api/v5/public/open-interest', {'instId': inst_id})
+        code = str(resp.get('code')) if isinstance(resp, dict) else None
+        if code == '0':
+            data = (resp.get('data') or [])
+            if data:
+                d0 = data[0]
+                oi = d0.get('oi') or d0.get('oiCcy')
+                ts = d0.get('ts')
+                try:
+                    latest = float(oi)
+                except Exception:
+                    latest = None
+                return {'latest': latest, 'ts': ts}
+        return {}
+    except Exception:
+        return {}
+
+
+def get_current_funding_rate() -> dict:
+    """获取当前资金费率。返回 {rate, ts}，失败返回空字典。"""
+    try:
+        inst_id = _get_okx_inst_id()
+        # 优先使用 CCXT，如失败则回退原生 REST
+        try:
+            fr = exchange.fetch_funding_rate(TRADE_CONFIG['symbol'])
+            rate = fr.get('fundingRate') if isinstance(fr, dict) else None
+            try:
+                rate = float(rate)
+            except Exception:
+                rate = None
+            ts = fr.get('timestamp') if isinstance(fr, dict) else None
+            return {'rate': rate, 'ts': ts}
+        except Exception:
+            pass
+        resp = _okx_public_get('/api/v5/public/funding-rate', {'instId': inst_id})
+        code = str(resp.get('code')) if isinstance(resp, dict) else None
+        if code == '0':
+            data = (resp.get('data') or [])
+            if data:
+                d0 = data[0]
+                rate = d0.get('fundingRate')
+                ts = d0.get('fundingTime') or d0.get('ts')
+                try:
+                    rate = float(rate)
+                except Exception:
+                    rate = None
+                return {'rate': rate, 'ts': ts}
+        return {}
+    except Exception:
+        return {}
+
 
 
 def _get_okx_price_tick_info():

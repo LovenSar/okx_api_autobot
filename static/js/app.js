@@ -10,6 +10,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     initCharts();
     updateData();
     updateMultiOverview();
+    updateUserPrompts();
     try {
         const cfgResp = await fetch('/api/config');
         const cfg = await cfgResp.json();
@@ -19,11 +20,13 @@ document.addEventListener('DOMContentLoaded', async function() {
         // 每配置的间隔更新一次数据（实时显示价格和持仓）
         setInterval(updateData, intervalMs);
         setInterval(updateMultiOverview, Math.max(2000, intervalMs * 2));
+        setInterval(updateUserPrompts, Math.max(3000, intervalMs * 2));
         setInterval(updateNextDecisionCountdown, 1000);
     } catch (e) {
         // 回退到1秒
         setInterval(updateData, 1000);
         setInterval(updateMultiOverview, 2000);
+        setInterval(updateUserPrompts, 3000);
         setInterval(updateNextDecisionCountdown, 1000);
     }
 });
@@ -66,6 +69,129 @@ function parseDecisionTimestamp(ts) {
         return new Date(year, month, day, hour, min, sec).getTime();
     }
     return NaN;
+}
+
+// 更新用户Prompt记录
+async function updateUserPrompts() {
+    try {
+        const listEl = document.getElementById('userPromptsList');
+        if (!listEl) return;
+        // 记录当前已展开的条目 key，用于刷新后恢复
+        const openKeys = new Set(Array.from(listEl.querySelectorAll('.prompt-item details[open]'))
+            .map(d => d.getAttribute('data-key'))
+            .filter(Boolean));
+        const resp = await fetch('/api/user_prompts?limit=20');
+        const data = await resp.json();
+        if (!Array.isArray(data) || data.length === 0) {
+            listEl.innerHTML = '<div class="no-data" style="text-align: center; color: #9ca3af; padding: 12px;">暂无记录</div>';
+            return;
+        }
+        const html = data.map((it, idx) => {
+            const ts = it.ts || it.timestamp || '--';
+            const status = it.status || 'sent';
+            const symbol = it.symbol || '';
+            const timeframe = it.timeframe || '';
+            const structured = it.structured_snapshot || '';
+            const fullPrompt = it.full_prompt || '';
+            const charLen = (typeof it.prompt_char_len === 'number')
+                ? it.prompt_char_len
+                : (typeof fullPrompt === 'string' ? fullPrompt.length : undefined);
+            // 提取 system/user 文本
+            let systemText = '';
+            let userText = '';
+            try {
+                const msgs = Array.isArray(it.messages) ? it.messages : [];
+                for (const m of msgs) {
+                    if (m && m.role === 'system') systemText = (m.content || '');
+                    if (m && m.role === 'user') userText = (m.content || '');
+                }
+            } catch (e) {}
+            // 错误信息
+            let errorHtml = '';
+            try {
+                if (it.error) {
+                    const t = it.error.type || 'Error';
+                    const c = (it.error.code !== undefined && it.error.code !== null) ? String(it.error.code) : 'N/A';
+                    const msg = it.error.message || it.error.preview || '';
+                    errorHtml = `<div style="margin-top:8px;color:#f87171;">错误: [${t} ${c}] ${escapeHtml(String(msg)).slice(0, 500)}</div>`;
+                }
+            } catch (e) {}
+            // 新字段块：结构化快照与完整Prompt
+            const structuredHtml = structured
+                ? `<div style="margin-top:8px;"><strong style=\"color:#9ca3af;\">结构化快照</strong><pre style=\"white-space:pre-wrap;word-break:break-word;background:#0f172a;padding:8px;border-radius:6px;\">${escapeHtml(structured)}</pre></div>`
+                : '';
+            const fullPromptHtml = fullPrompt
+                ? `<div style="margin-top:8px;"><strong style=\"color:#9ca3af;\">完整 Prompt</strong><pre style=\"white-space:pre-wrap;word-break:break-word;background:#0f172a;padding:8px;border-radius:6px;\">${escapeHtml(fullPrompt)}</pre></div>`
+                : '';
+            // 计算稳定 key 并判断是否应恢复展开
+            const key = promptKey(it);
+            const isOpen = openKeys.has(key);
+            const metaLine = [
+                ts,
+                status.toUpperCase(),
+                symbol ? `• ${symbol}` : '',
+                timeframe ? `• ${timeframe}` : '',
+                (charLen != null ? `• ${charLen} chars` : '')
+            ].filter(Boolean).join(' ');
+            return `
+            <div class="prompt-item" style="border-bottom:1px solid #2d2d44;padding:8px 0;">
+                <div style="color:#9ca3af;font-size:0.85em;margin-bottom:6px;">${escapeHtml(metaLine)}</div>
+                <details data-key="${escapeHtml(key)}" ${isOpen ? 'open' : ''}>
+                    <summary style="cursor:pointer;color:#60a5fa;">查看内容</summary>
+                    <div style="margin-top:8px;">
+                        ${systemText ? `<div style="margin-bottom:8px;"><strong style="color:#9ca3af;">System</strong><pre style="white-space:pre-wrap;word-break:break-word;background:#0f172a;padding:8px;border-radius:6px;">${escapeHtml(systemText)}</pre></div>` : ''}
+                        ${userText ? `<div><strong style="color:#9ca3af;">User</strong><pre style="white-space:pre-wrap;word-break:break-word;background:#0f172a;padding:8px;border-radius:6px;">${escapeHtml(userText)}</pre></div>` : ''}
+                        ${structuredHtml}
+                        ${fullPromptHtml}
+                        ${errorHtml}
+                    </div>
+                </details>
+            </div>`;
+        }).join('');
+        // 保持滚动位置策略：若之前在底部则刷新后保持在底部
+        const wasAtBottom = Math.abs(listEl.scrollHeight - listEl.clientHeight - listEl.scrollTop) < 5;
+        listEl.innerHTML = html;
+        if (wasAtBottom) listEl.scrollTop = listEl.scrollHeight;
+    } catch (e) {
+        // 忽略渲染错误
+    }
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}
+
+// 为每条记录生成相对稳定的 key，用于刷新后恢复展开状态
+function promptKey(it) {
+    try {
+        const ts = it && (it.ts || it.timestamp) ? String(it.ts || it.timestamp) : '';
+        const status = it && it.status ? String(it.status) : '';
+        const symbol = it && it.symbol ? String(it.symbol) : '';
+        const timeframe = it && it.timeframe ? String(it.timeframe) : '';
+        const len = (it && typeof it.prompt_char_len === 'number')
+            ? String(it.prompt_char_len)
+            : (it && typeof it.full_prompt === 'string' ? String(it.full_prompt.length) : '');
+        let userFirst = '';
+        let sysFirst = '';
+        try {
+            const msgs = Array.isArray(it?.messages) ? it.messages : [];
+            for (const m of msgs) {
+                if (m && m.role === 'user' && !userFirst) userFirst = String(m.content || '');
+                if (m && m.role === 'system' && !sysFirst) sysFirst = String(m.content || '');
+            }
+        } catch (e) {}
+        const uf = userFirst.slice(0, 32);
+        const sf = sysFirst.slice(0, 32);
+        const fp = (it && typeof it.full_prompt === 'string') ? it.full_prompt.slice(0, 32) : '';
+        return [ts, status, symbol, timeframe, len, uf, sf, fp].join('|');
+    } catch (e) {
+        return Math.random().toString(36).slice(2);
+    }
 }
 
 // 更新“下次决策”倒计时

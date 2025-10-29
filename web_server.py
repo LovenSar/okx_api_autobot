@@ -28,7 +28,7 @@ def __get_leverage_for_symbol(sym):
             return int(deepseekok2.TRADE_CONFIG['leverage'])
         except Exception:
             return 10
-from bot.utils import TRADES_LOG_PATH, PROFIT_CURVE_LOG_PATH
+from bot.utils import TRADES_LOG_PATH, PROFIT_CURVE_LOG_PATH, PROMPTS_LOG_PATH
 
 # 明确指定模板和静态文件路径
 app = Flask(__name__, 
@@ -395,6 +395,61 @@ def get_performance_aggregate():
             'win_rate': (wins / (wins + losses) * 100.0) if (wins + losses) > 0 else 0,
             'equity': equity,
         })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/user_prompts')
+def get_user_prompts():
+    """获取用户Prompt记录：优先从 prompts.jsonl 读取，支持 limit（默认50 或 all）。"""
+    try:
+        limit_param = request.args.get('limit', default='50')
+        limit = None if str(limit_param).lower() == 'all' else max(1, min(int(limit_param), 2000))
+    except Exception:
+        limit = 50
+    try:
+        items = []
+        if os.path.exists(PROMPTS_LOG_PATH):
+            if limit is None:
+                with open(PROMPTS_LOG_PATH, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        try:
+                            items.append(json.loads(line))
+                        except Exception:
+                            continue
+            else:
+                # 高效尾部读取指定条数
+                with open(PROMPTS_LOG_PATH, 'rb') as f:
+                    f.seek(0, os.SEEK_END)
+                    file_size = f.tell()
+                    if file_size == 0:
+                        return jsonify([])
+                    lines = []
+                    buffer = bytearray()
+                    pointer = file_size - 1
+                    while pointer >= 0 and len(lines) < limit:
+                        f.seek(pointer)
+                        byte = f.read(1)
+                        if byte == b'\n':
+                            if buffer:
+                                try:
+                                    line = buffer[::-1].decode('utf-8')
+                                    obj = json.loads(line)
+                                    lines.append(obj)
+                                except Exception:
+                                    pass
+                                buffer.clear()
+                        else:
+                            buffer.extend(byte)
+                        pointer -= 1
+                    if buffer:
+                        try:
+                            line = buffer[::-1].decode('utf-8')
+                            obj = json.loads(line)
+                            lines.append(obj)
+                        except Exception:
+                            pass
+                    items = list(reversed(lines))
+        return jsonify(items)
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 

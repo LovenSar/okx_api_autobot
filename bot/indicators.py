@@ -13,17 +13,28 @@ def calculate_technical_indicators(df):
         df['sma_20'] = df['close'].rolling(window=20, min_periods=1).mean()
         df['sma_50'] = df['close'].rolling(window=50, min_periods=1).mean()
 
+        # EMA 指标
+        df['ema_20'] = df['close'].ewm(span=20).mean()
         df['ema_12'] = df['close'].ewm(span=12).mean()
         df['ema_26'] = df['close'].ewm(span=26).mean()
         df['macd'] = df['ema_12'] - df['ema_26']
         df['macd_signal'] = df['macd'].ewm(span=9).mean()
         df['macd_histogram'] = df['macd'] - df['macd_signal']
 
+        # RSI 指标
         delta = df['close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        df['rsi'] = 100 - (100 / (1 + rs))
+        # RSI(14)
+        gain14 = (delta.where(delta > 0, 0)).rolling(14).mean()
+        loss14 = (-delta.where(delta < 0, 0)).rolling(14).mean()
+        rs14 = gain14 / loss14
+        df['rsi_14'] = 100 - (100 / (1 + rs14))
+        # RSI(7)
+        gain7 = (delta.where(delta > 0, 0)).rolling(7).mean()
+        loss7 = (-delta.where(delta < 0, 0)).rolling(7).mean()
+        rs7 = gain7 / loss7
+        df['rsi_7'] = 100 - (100 / (1 + rs7))
+        # 兼容旧字段名
+        df['rsi'] = df['rsi_14']
 
         df['bb_middle'] = df['close'].rolling(20).mean()
         bb_std = df['close'].rolling(20).std()
@@ -36,6 +47,9 @@ def calculate_technical_indicators(df):
 
         df['resistance'] = df['high'].rolling(20).max()
         df['support'] = df['low'].rolling(20).min()
+
+        # 中间价（近似：高低价均值）
+        df['mid_price'] = (df['high'] + df['low']) / 2.0
 
         df = df.bfill().ffill()
         return df
@@ -129,6 +143,23 @@ def get_market_trend(df):
         return {}
 
 
+def _compute_atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    try:
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        prev_close = close.shift(1)
+        tr = pd.concat([
+            (high - low),
+            (high - prev_close).abs(),
+            (low - prev_close).abs()
+        ], axis=1).max(axis=1)
+        atr = tr.rolling(window=period, min_periods=1).mean()
+        return atr
+    except Exception:
+        return pd.Series([None] * len(df), index=df.index)
+
+
 def get_btc_ohlcv_enhanced():
     try:
         now_ts = time.time()
@@ -158,14 +189,31 @@ def get_btc_ohlcv_enhanced():
         trend_4h = None
         boll_4h = None
         levels_4h = None
+        background_4h = None
         try:
             ohlcv_4h = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120))
             df4 = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df4['timestamp'] = pd.to_datetime(df4['timestamp'], unit='ms')
+            # 4H 布林带
             df4['bb_middle'] = df4['close'].rolling(20).mean()
             bb4_std = df4['close'].rolling(20).std()
             df4['bb_upper'] = df4['bb_middle'] + (bb4_std * 2)
             df4['bb_lower'] = df4['bb_middle'] - (bb4_std * 2)
+            # 4H EMA、MACD、RSI、ATR、成交量均值
+            df4['ema_20'] = df4['close'].ewm(span=20).mean()
+            df4['ema_50'] = df4['close'].ewm(span=50).mean()
+            df4['ema_12'] = df4['close'].ewm(span=12).mean()
+            df4['ema_26'] = df4['close'].ewm(span=26).mean()
+            df4['macd'] = df4['ema_12'] - df4['ema_26']
+            df4['macd_signal'] = df4['macd'].ewm(span=9).mean()
+            d4_delta = df4['close'].diff()
+            gain14_4h = (d4_delta.where(d4_delta > 0, 0)).rolling(14).mean()
+            loss14_4h = (-d4_delta.where(d4_delta < 0, 0)).rolling(14).mean()
+            rs14_4h = gain14_4h / loss14_4h
+            df4['rsi_14'] = 100 - (100 / (1 + rs14_4h))
+            atr3_4h = _compute_atr(df4, period=3)
+            atr14_4h = _compute_atr(df4, period=14)
+            vol_avg_4h = df4['volume'].rolling(20, min_periods=1).mean()
             df4 = df4.bfill().ffill()
             last4 = df4.iloc[-1]
             price4 = float(last4['close'])
@@ -191,10 +239,24 @@ def get_btc_ohlcv_enhanced():
             }
             # 使用4H数据计算关键位（含斐波回撤）
             levels_4h = get_support_resistance_levels(df4)
+            # 4H 背景汇总（用于 Prompt 长期框架）
+            macd_series_4h = df4['macd'].tail(10).tolist()
+            rsi_series_4h = df4['rsi_14'].tail(10).tolist()
+            background_4h = {
+                'ema20': float(last4['ema_20']),
+                'ema50': float(last4['ema_50']),
+                'atr3': float(atr3_4h.iloc[-1]) if len(atr3_4h) else None,
+                'atr14': float(atr14_4h.iloc[-1]) if len(atr14_4h) else None,
+                'volume_current': float(last4['volume']),
+                'volume_avg': float(vol_avg_4h.iloc[-1]) if len(vol_avg_4h) else None,
+                'macd_series': macd_series_4h,
+                'rsi14_series': rsi_series_4h,
+            }
         except Exception:
             trend_4h = None
             boll_4h = None
             levels_4h = None
+            background_4h = None
 
         levels_15m = None
         kline_15m_data = None
@@ -251,7 +313,10 @@ def get_btc_ohlcv_enhanced():
                 'sma_5': current_data.get('sma_5', 0),
                 'sma_20': current_data.get('sma_20', 0),
                 'sma_50': current_data.get('sma_50', 0),
+                'ema_20': current_data.get('ema_20', 0),
                 'rsi': current_data.get('rsi', 0),
+                'rsi_7': current_data.get('rsi_7', 0),
+                'rsi_14': current_data.get('rsi_14', 0),
                 'macd': current_data.get('macd', 0),
                 'macd_signal': current_data.get('macd_signal', 0),
                 'macd_histogram': current_data.get('macd_histogram', 0),
@@ -267,6 +332,16 @@ def get_btc_ohlcv_enhanced():
             'levels_4h': levels_4h,
             'levels_15m': levels_15m,
             'kline_15m_data': kline_15m_data,
+            # 日内序列（默认按当前 timeframe 的最近10条）
+            'intraday_series': {
+                'mid_prices': df['mid_price'].tail(10).tolist() if 'mid_price' in df.columns else None,
+                'ema20': df['ema_20'].tail(10).tolist() if 'ema_20' in df.columns else None,
+                'macd': df['macd'].tail(10).tolist() if 'macd' in df.columns else None,
+                'rsi7': df['rsi_7'].tail(10).tolist() if 'rsi_7' in df.columns else None,
+                'rsi14': df['rsi_14'].tail(10).tolist() if 'rsi_14' in df.columns else None,
+            },
+            # 4H 背景框架摘要
+            'background_4h': background_4h,
             'full_data': df
         }
 

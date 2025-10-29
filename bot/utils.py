@@ -65,6 +65,7 @@ AI_DECISIONS_LOG_PATH = os.path.join(DATA_DIR, 'ai_decisions.jsonl')
 TRADES_LOG_PATH = os.path.join(DATA_DIR, 'trades.jsonl')
 PROFIT_CURVE_LOG_PATH = os.path.join(DATA_DIR, 'profit_curve.jsonl')
 REALIZED_PNL_PATH = os.path.join(DATA_DIR, 'realized_pnl.json')
+PROMPTS_LOG_PATH = os.path.join(DATA_DIR, 'prompts.jsonl')
 
 
 def append_ai_decision_to_file(decision: dict) -> None:
@@ -87,6 +88,14 @@ def append_profit_point_to_file(point: dict) -> None:
     try:
         with open(PROFIT_CURVE_LOG_PATH, 'a', encoding='utf-8') as f:
             f.write(json.dumps(point, ensure_ascii=False) + '\n')
+    except Exception:
+        pass
+
+
+def append_prompt_to_file(prompt_record: dict) -> None:
+    try:
+        with open(PROMPTS_LOG_PATH, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(prompt_record, ensure_ascii=False) + '\n')
     except Exception:
         pass
 
