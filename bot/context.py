@@ -23,15 +23,9 @@ logger.setLevel(_level)
 # AI 客户端与模型（统一为 OpenAI 兼容接口：自定义 base_url 与 api_key）
 AI_PROVIDER = os.getenv('AI_PROVIDER', 'openai_compatible').lower()
 
-_AI_BASE_URL = (
-    os.getenv('OPENAI_BASE_URL')
-    or os.getenv('AI_BASE_URL')
-    or os.getenv('DEEPSEEK_BASE_URL')
-    or "https://svip.xty.app/v1"
-)
-_AI_API_KEY = (os.getenv('DEEPSEEK_API_KEY')
-    or os.getenv('DASHSCOPE_API_KEY')
-)
+_AI_BASE_URL = "https://svip.xty.app/v1"
+
+_AI_API_KEY = os.getenv('DEEPSEEK_API_KEY')
 
 ai_client = OpenAI(
     api_key=_AI_API_KEY,
@@ -49,11 +43,7 @@ ai_client = OpenAI(
 )
 
 # 统一模型名来源，优先使用 AI_MODEL，其次兼容旧变量
-AI_MODEL = (
-    os.getenv('AI_MODEL')
-    or os.getenv('DEEPSEEK_MODEL')
-    or "deepseek-reasoner"
-)
+AI_MODEL = "deepseek-v3.1"
 
 # 交易所
 exchange = ccxt.okx({

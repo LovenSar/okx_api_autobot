@@ -1,7 +1,7 @@
 import os
 import time
 from datetime import datetime, timedelta
-import requests
+import httpx
 
 from .context import TRADE_CONFIG
 from . import state
@@ -41,7 +41,25 @@ def get_sentiment_indicators():
         }
 
         headers = {"Content-Type": "application/json", "X-API-KEY": API_KEY}
-        response = requests.post(API_URL, json=request_body, headers=headers)
+
+        # HTTPX 客户端，支持重定向与可配置超时
+        connect_timeout = float(os.getenv('CRYPTO_HTTP_CONNECT_TIMEOUT', os.getenv('AI_HTTP_CONNECT_TIMEOUT', '8')))
+        read_timeout = float(os.getenv('CRYPTO_HTTP_READ_TIMEOUT', os.getenv('AI_HTTP_READ_TIMEOUT', '20')))
+        write_timeout = float(os.getenv('CRYPTO_HTTP_WRITE_TIMEOUT', os.getenv('AI_HTTP_WRITE_TIMEOUT', '20')))
+        pool_timeout = float(os.getenv('CRYPTO_HTTP_POOL_TIMEOUT', os.getenv('AI_HTTP_POOL_TIMEOUT', '10')))
+
+        with httpx.Client(
+            base_url=API_URL,
+            headers=headers,
+            follow_redirects=True,
+            timeout=httpx.Timeout(
+                connect=connect_timeout,
+                read=read_timeout,
+                write=write_timeout,
+                pool=pool_timeout,
+            ),
+        ) as client:
+            response = client.post('', json=request_body)
 
         if response.status_code == 200:
             data = response.json()
@@ -78,6 +96,12 @@ def get_sentiment_indicators():
                         _cache['ts'] = now_ts
                         _cache['data'] = data_obj
                         return data_obj
+        return None
+    except httpx.TimeoutException as e:
+        print(f"情绪指标获取超时: {e}")
+        return None
+    except httpx.HTTPError as e:
+        print(f"情绪指标获取失败(网络): {e}")
         return None
     except Exception as e:
         print(f"情绪指标获取失败: {e}")

@@ -2,6 +2,7 @@ import os
 import time
 import json
 import pandas as pd
+import logging as logger
 from datetime import datetime
 
 from .context import AI_PROVIDER, AI_MODEL, ai_client, TRADE_CONFIG, get_symbol_leverage
@@ -468,10 +469,9 @@ ETH买入价3,000，止损2,800（风险$200）
                 {"role": "system", "content": f"您是一位专业的交易员，专注于{TRADE_CONFIG['timeframe']}周期趋势分析。请结合K线形态和技术指标做出判断，并严格遵循JSON格式要求。"},
                 {"role": "user", "content": prompt}
             ],
-            stream=False,
-            temperature=0.1,
-            timeout=float(os.getenv('AI_REQUEST_TIMEOUT_SECONDS', '60'))
+            temperature=0.1
         )
+        logger.debug(f"AI API Response: {response}")
         result = _extract_ai_content(response)
         if not result:
             try:
