@@ -285,6 +285,12 @@ def get_signal_history():
             'signal_stats': signal_stats,
             'confidence_stats': confidence_stats,
             'total_signals': len(records),
+            'portfolio_last_round': {
+                'signal_stats': (deepseekok2.web_data.get('last_portfolio_stats') or {}).get('signal_stats'),
+                'confidence_stats': (deepseekok2.web_data.get('last_portfolio_stats') or {}).get('confidence_stats'),
+                'total_decisions': (deepseekok2.web_data.get('last_portfolio_stats') or {}).get('total_decisions'),
+                'timestamp': (deepseekok2.web_data.get('last_portfolio_stats') or {}).get('timestamp'),
+            },
             'recent_signals': records[-10:] if records else []
         })
     except Exception as e:
@@ -518,13 +524,24 @@ def multi_overview():
                     positions = _with_rate_limit_retry(lambda: deepseekok2.exchange.fetch_positions([sym]))
                     for pos in positions:
                         if pos.get('symbol') == sym and float(pos.get('contracts') or 0) > 0:
+                            info = pos.get('info') or {}
+                            try:
+                                ct_ms = int(info.get('cTime')) if info.get('cTime') not in (None, '') else None
+                            except Exception:
+                                ct_ms = None
+                            try:
+                                ut_ms = int(info.get('uTime')) if info.get('uTime') not in (None, '') else None
+                            except Exception:
+                                ut_ms = None
                             position = {
                                 'side': pos.get('side'),
                                 'size': float(pos.get('contracts')),
                                 'entry_price': float(pos.get('entryPrice') or 0),
                                 'unrealized_pnl': float(pos.get('unrealizedPnl') or 0),
                                 'leverage': float(pos.get('leverage') or 0),
-                                'symbol': sym
+                                'symbol': sym,
+                                'create_time_ms': ct_ms,
+                                'update_time_ms': ut_ms
                             }
                             break
                     # 写回缓存

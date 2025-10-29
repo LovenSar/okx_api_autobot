@@ -47,6 +47,12 @@ web_data = {
         'status': 'unknown',
         'last_check': None,
         'error_message': None
+    },
+    'last_portfolio_stats': {
+        'signal_stats': {'BUY': 0, 'SELL': 0, 'HOLD': 0},
+        'confidence_stats': {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0},
+        'total_decisions': 0,
+        'timestamp': None
     }
 }
 

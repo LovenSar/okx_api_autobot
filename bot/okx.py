@@ -134,6 +134,15 @@ def _get_okx_inst_id() -> str:
     except Exception:
         pass
     return TRADE_CONFIG['symbol'].replace('/', '-').replace(':USDT', '-SWAP')
+
+def get_inst_id_for_symbol(symbol: str) -> str:
+    try:
+        market = exchange.market(symbol)
+        if isinstance(market, dict):
+            return market.get('id') or market.get('info', {}).get('instId') or symbol.replace('/', '-').replace(':USDT', '-SWAP')
+    except Exception:
+        pass
+    return symbol.replace('/', '-').replace(':USDT', '-SWAP')
 def _okx_public_get(path: str, params: dict = None) -> dict:
     try:
         host = None
@@ -240,10 +249,49 @@ def _get_okx_price_tick_info():
         pass
     return 0.1, 1
 
+def _get_price_tick_info_for_symbol(symbol: str):
+    """获取指定币种价格tick信息（步长与小数位）。"""
+    try:
+        market = exchange.market(symbol)
+        info = market.get('info', {}) if isinstance(market, dict) else {}
+        tick_sz_str = (info.get('tickSz') or info.get('tickSize') or '').strip()
+        if tick_sz_str:
+            try:
+                step = float(tick_sz_str)
+            except Exception:
+                step = 0.1
+            decimals = 0
+            if '.' in tick_sz_str:
+                decimals = len(tick_sz_str.split('.')[-1].rstrip('0'))
+            return step, max(decimals, 0)
+        precision = market.get('precision', {}) if isinstance(market, dict) else {}
+        dec = precision.get('price')
+        if isinstance(dec, int) and dec >= 0:
+            step = 10 ** (-dec) if dec <= 8 else 1e-8
+            return step, dec
+    except Exception:
+        pass
+    return 0.1, 1
+
 
 def _format_price_for_okx(px: float) -> str:
     try:
         step, decimals = _get_okx_price_tick_info()
+        if step <= 0:
+            step = 0.1
+            decimals = 1
+        rounded = round(round(float(px) / step) * step, max(decimals, 0))
+        fmt = f"{{:.{max(decimals, 0)}f}}"
+        return fmt.format(rounded)
+    except Exception:
+        try:
+            return f"{float(px):.2f}"
+        except Exception:
+            return str(px)
+
+def _format_price_for_okx_for_symbol(symbol: str, px: float) -> str:
+    try:
+        step, decimals = _get_price_tick_info_for_symbol(symbol)
         if step <= 0:
             step = 0.1
             decimals = 1
@@ -268,6 +316,17 @@ def get_contract_size_btc() -> float:
         return 0.001
 
 
+def get_contract_size_btc_for_symbol(symbol: str) -> float:
+    try:
+        market = exchange.market(symbol)
+        contract_size = market.get('contractSize') or float(market.get('info', {}).get('ctVal', 0))
+        if not contract_size or contract_size <= 0:
+            contract_size = 0.001
+        return float(contract_size)
+    except Exception:
+        return 0.001
+
+
 def btc_amount_to_okx_contracts(btc_amount: float) -> int:
     try:
         contract_size = get_contract_size_btc()
@@ -279,6 +338,12 @@ def btc_amount_to_okx_contracts(btc_amount: float) -> int:
 
 def estimate_required_margin_usdt(contracts: int, mark_price_usdt: float, leverage: float) -> float:
     ct_size_btc = get_contract_size_btc()
+    notional = float(contracts) * ct_size_btc * float(mark_price_usdt)
+    return (notional / max(float(leverage), 1.0)) * 1.05
+
+
+def estimate_required_margin_usdt_for_symbol(contracts: int, mark_price_usdt: float, leverage: float, symbol: str) -> float:
+    ct_size_btc = get_contract_size_btc_for_symbol(symbol)
     notional = float(contracts) * ct_size_btc * float(mark_price_usdt)
     return (notional / max(float(leverage), 1.0)) * 1.05
 
@@ -352,6 +417,104 @@ def _okx_signed_post(path: str, body_obj) -> dict:
 
         resp_json = _with_rate_limit_retry(_do_post)
         return resp_json
+    except Exception as e:
+        return {'code': 'error', 'msg': str(e)}
+
+
+def place_batch_orders(orders: list) -> dict:
+    """调用 OKX 批量下单接口 /api/v5/trade/batch-orders。
+
+    入参 orders 列表每项支持字段（尽量与OKX一致）：
+      - symbol: 本地符号（如 'BTC/USDT:USDT'），若提供则自动填充 instId
+      - instId: 可直接提供OKX instId
+      - tdMode: 默认为 'cross'
+      - side: 'buy' | 'sell'
+      - ordType: 默认为 'limit'
+      - sz: 下单张数（int 或 字符串）
+      - px: 价格（float 或 字符串）
+      - posSide: 可选 'long' | 'short'（双向持仓）
+      - reduceOnly: 可选 True/False 或 'true'/'false'
+      - tag: 可选
+
+    返回 OKX 原始响应字典。
+    """
+    try:
+        if not isinstance(orders, list) or len(orders) == 0:
+            return {'code': '0', 'data': []}
+
+        payload = []
+        default_tag = '60bb4a8d3416BCDE'
+        for it in orders:
+            try:
+                if not isinstance(it, dict):
+                    continue
+                symbol = it.get('symbol')
+                inst_id = (it.get('instId') or '').strip()
+                if not inst_id:
+                    if symbol:
+                        inst_id = get_inst_id_for_symbol(symbol)
+                    else:
+                        # 无 symbol 无 instId，跳过
+                        continue
+
+                td_mode = it.get('tdMode') or 'cross'
+                side = (it.get('side') or '').lower()
+                ord_type = (it.get('ordType') or 'limit').lower()
+                sz_raw = it.get('sz')
+                try:
+                    sz = str(int(float(sz_raw))) if sz_raw is not None else None
+                except Exception:
+                    sz = str(sz_raw) if sz_raw is not None else None
+                px_raw = it.get('px')
+                if px_raw is not None:
+                    try:
+                        px = _format_price_for_okx_for_symbol(symbol or inst_id, float(px_raw))
+                    except Exception:
+                        px = str(px_raw)
+                else:
+                    px = None
+
+                pos_side = it.get('posSide')
+                reduce_only = it.get('reduceOnly')
+                if isinstance(reduce_only, bool):
+                    reduce_only = 'true' if reduce_only else 'false'
+                tag = it.get('tag') or default_tag
+
+                obj = {
+                    'instId': inst_id,
+                    'tdMode': td_mode,
+                    'side': side,
+                    'ordType': ord_type,
+                    'sz': sz,
+                    'tag': tag,
+                }
+                if px is not None:
+                    obj['px'] = px
+                if pos_side:
+                    obj['posSide'] = pos_side
+                if reduce_only is not None:
+                    obj['reduceOnly'] = reduce_only
+
+                # 过滤必要字段
+                if not obj.get('sz') or not obj.get('side'):
+                    continue
+                payload.append(obj)
+            except Exception:
+                continue
+
+        if not payload:
+            return {'code': '0', 'data': []}
+
+        try:
+            logging.debug(f"POST /api/v5/trade/batch-orders body={payload}")
+        except Exception:
+            pass
+        resp = _okx_signed_post('/api/v5/trade/batch-orders', payload)
+        try:
+            logging.debug(f"/api/v5/trade/batch-orders response={resp}")
+        except Exception:
+            pass
+        return resp
     except Exception as e:
         return {'code': 'error', 'msg': str(e)}
 
@@ -804,7 +967,9 @@ def get_all_positions(symbols: list = None) -> list:
         'size': float,            # 合约张数
         'entry_price': float,
         'unrealized_pnl': float,
-        'leverage': float
+        'leverage': float,
+        'create_time_ms': int | None,   # 开仓时间(毫秒UTC)
+        'update_time_ms': int | None    # 最近更新时间(毫秒UTC)
     }
     """
     results = []
@@ -824,13 +989,24 @@ def get_all_positions(symbols: list = None) -> list:
                 contracts = float(pos.get('contracts') or 0)
                 if contracts <= 0:
                     continue
+                info = pos.get('info') or {}
+                try:
+                    ct_ms = int(info.get('cTime')) if info.get('cTime') not in (None, '') else None
+                except Exception:
+                    ct_ms = None
+                try:
+                    ut_ms = int(info.get('uTime')) if info.get('uTime') not in (None, '') else None
+                except Exception:
+                    ut_ms = None
                 results.append({
                     'symbol': pos.get('symbol'),
                     'side': pos.get('side'),
                     'size': contracts,
                     'entry_price': float(pos.get('entryPrice') or 0),
                     'unrealized_pnl': float(pos.get('unrealizedPnl') or 0),
-                    'leverage': float(pos.get('leverage') or get_symbol_leverage(pos.get('symbol')))
+                    'leverage': float(pos.get('leverage') or get_symbol_leverage(pos.get('symbol'))),
+                    'create_time_ms': ct_ms,
+                    'update_time_ms': ut_ms,
                 })
             except Exception:
                 continue
@@ -865,7 +1041,26 @@ def format_positions_overview_for_prompt(positions: list) -> str:
                 ep = p.get('entry_price')
                 upnl = p.get('unrealized_pnl')
                 lev = p.get('leverage')
-                lines.append(f"{idx}) {sym} {side} 张:{size} 入场:{ep} UPNL:{upnl:.2f} L:{lev}")
+                # 持仓时间格式化（优先用 create_time_ms）
+                age_str = "-"
+                try:
+                    ct = p.get('create_time_ms')
+                    if ct:
+                        import time as _t
+                        diff_sec = max(0, int((_t.time() * 1000 - int(ct)) / 1000))
+                        if diff_sec >= 3600:
+                            h = diff_sec // 3600
+                            m = (diff_sec % 3600) // 60
+                            age_str = f"{h}h{m}M" if m > 0 else f"{h}h"
+                        elif diff_sec >= 60:
+                            m = diff_sec // 60
+                            s = diff_sec % 60
+                            age_str = f"{m}M{s}s" if s > 0 else f"{m}M"
+                        else:
+                            age_str = f"{diff_sec}s"
+                except Exception:
+                    age_str = "-"
+                lines.append(f"{idx}) {sym} {side} 张:{size} 入场:{ep} UPNL:{upnl:.2f} L:{lev} 持仓时间:{age_str}")
             except Exception:
                 continue
         return "\n".join(lines) if lines else "无持仓"

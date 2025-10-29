@@ -120,6 +120,32 @@
                     </div>
                 </div>
             </div>
+            
+            <!-- 本轮组合统计 -->
+            <div class="card" id="portfolioStatsCard">
+                <div class="card-header">
+                    <i class="fas fa-layer-group"></i>
+                    <h3>本轮组合统计</h3>
+                </div>
+                <div class="card-body">
+                    <div class="info-item">
+                        <span class="label">本轮总决策数</span>
+                        <span class="value" id="portfolioTotal">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">信号(B/S/H)</span>
+                        <span class="value" id="portfolioSignals">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">信心(H/M/L)</span>
+                        <span class="value" id="portfolioConf">--</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">时间</span>
+                        <span class="value" id="portfolioTs">--</span>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- 多合约持仓管理 -->
@@ -139,6 +165,7 @@
                                     <th>持仓</th>
                                     <th>数量(张)</th>
                                     <th>入场价</th>
+                                    <th>持仓时间</th>
                                     <th>未实现盈亏(USDT)</th>
                                     <th>杠杆</th>
                                     <th>止盈</th>
@@ -147,7 +174,7 @@
                             </thead>
                             <tbody id="multiOverviewBody">
                                 <tr>
-                                    <td colspan="9" class="no-data">加载中...</td>
+                                    <td colspan="10" class="no-data">加载中...</td>
                                 </tr>
                             </tbody>
                         </table>

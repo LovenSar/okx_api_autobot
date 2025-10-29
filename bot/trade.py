@@ -16,10 +16,15 @@ from .okx import (
     set_position_tp_sl_for_okx,
     _parse_price_value,
     get_contract_size_btc,
+    get_contract_size_btc_for_symbol,
+    estimate_required_margin_usdt_for_symbol,
+    get_all_positions,
+    place_batch_orders,
+    get_account_overview,
 )
 from .context import exchange
 from .okx import _with_rate_limit_retry
-from .state import set_symbol_tpsl_expected
+from .state import set_symbol_tpsl_expected, ACCOUNT_POS_MODE, switch_active_symbol
 from .utils import update_win_statistics, save_realized_pnl, append_trade_to_file
 
 
@@ -100,6 +105,43 @@ def execute_trade(signal_data, price_data):
                             dedup = deduplicate_pending_tpsl(side_check)
                             if dedup.get('cancelled'):
                                 print(f"发现并撤销重复策略委托: {dedup.get('cancelled')}")
+                        except Exception:
+                            pass
+                        # 基于AI原始HOLD信号，记录到交易记录（供Web界面展示）
+                        try:
+                            from .okx import get_contract_size_btc as _ctbtc
+                            ct_size_btc = float(_ctbtc())
+                        except Exception:
+                            ct_size_btc = 0.001
+                        try:
+                            pos_for_amount = refreshed_position or current_position
+                            amount_btc = float(pos_for_amount['size']) * ct_size_btc if (pos_for_amount and pos_for_amount.get('size')) else 0.0
+                        except Exception:
+                            amount_btc = 0.0
+                        try:
+                            _sym = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
+                            _base = _sym.split('/')[0] if '/' in _sym else 'BTC'
+                        except Exception:
+                            _sym = 'BTC/USDT:USDT'
+                            _base = 'BTC'
+                        try:
+                            trade_record = {
+                                'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                                'symbol': _sym,
+                                'signal': 'HOLD',
+                                'price': price_data['price'],
+                                'amount': amount_btc,
+                                'base': _base,
+                                'confidence': (signal_data.get('confidence') or '').upper(),
+                                'reason': signal_data.get('reason')
+                            }
+                            state.web_data['trade_history'].append(trade_record)
+                            if len(state.web_data['trade_history']) > 100:
+                                state.web_data['trade_history'].pop(0)
+                            try:
+                                append_trade_to_file(trade_record)
+                            except Exception:
+                                pass
                         except Exception:
                             pass
                     except Exception:
@@ -474,3 +516,421 @@ def execute_trade(signal_data, price_data):
         traceback.print_exc()
 
 
+
+# ============ 组合级批量下单（不含TP/SL） ============
+def build_plain_orders_for_decision(symbol: str, decision: dict, price_data: dict, current_position: dict = None) -> list:
+    """根据单个币种决策构建普通批量下单条目（不包含任何止盈止损策略委托）。
+
+    返回列表元素形如：
+    {
+      'symbol': symbol,
+      'side': 'buy'|'sell',
+      'ordType': 'limit',
+      'sz': int,
+      'px': float,
+      'posSide': 'long'|'short' (可选),
+      'reduceOnly': True|False (可选),
+      'tag': '...'
+    }
+    """
+    try:
+        if not isinstance(decision, dict):
+            return []
+        signal = (decision.get('signal') or '').upper()
+        if signal == 'HOLD':
+            return []
+
+        # 目标张数：优先AI给的 size/sz，否则按默认 amount 换算
+        base_amount_btc = TRADE_CONFIG['amount']
+        desired_contracts = btc_amount_to_okx_contracts(base_amount_btc)
+        try:
+            raw_size = decision.get('size')
+            if raw_size is None:
+                raw_size = decision.get('sz')
+            if raw_size is not None:
+                szv = int(float(raw_size))
+                if szv > 0:
+                    desired_contracts = szv
+        except Exception:
+            pass
+
+        mark_price = float(price_data.get('price')) if price_data and price_data.get('price') is not None else None
+        if mark_price is None:
+            return []
+
+        orders = []
+        new_side = 'long' if signal == 'BUY' else 'short'
+
+        # 双向或净值模式下的 posSide 设置
+        pos_side_open = None
+        try:
+            if ACCOUNT_POS_MODE == 'long_short':
+                pos_side_open = new_side
+        except Exception:
+            pos_side_open = None
+
+        # 如果有反向持仓，先构建平仓单（reduceOnly）
+        try:
+            if current_position and current_position.get('side') and current_position.get('size'):
+                cur_side = current_position.get('side')
+                if cur_side in ('long', 'short') and cur_side != new_side:
+                    close_side = 'sell' if cur_side == 'long' else 'buy'
+                    close_px = compute_aggressive_limit_price(close_side, mark_price)
+                    close_item = {
+                        'symbol': symbol,
+                        'side': close_side,
+                        'ordType': 'limit',
+                        'sz': int(float(current_position.get('size'))),
+                        'px': float(close_px),
+                        'reduceOnly': True,
+                    }
+                    try:
+                        if ACCOUNT_POS_MODE == 'long_short':
+                            close_item['posSide'] = cur_side
+                        else:
+                            pass
+                    except Exception:
+                        pass
+                    orders.append(close_item)
+        except Exception:
+            pass
+
+        # 开仓单（不含TP/SL）
+        open_side = 'buy' if signal == 'BUY' else 'sell'
+        # 如果已有同向持仓，当前版本不进行批量加仓，保持现状
+        if current_position and current_position.get('side') == new_side:
+            return orders
+
+        open_px = compute_aggressive_limit_price(open_side, mark_price)
+        open_item = {
+            'symbol': symbol,
+            'side': open_side,
+            'ordType': 'limit',
+            'sz': int(desired_contracts),
+            'px': float(open_px),
+        }
+        if pos_side_open:
+            open_item['posSide'] = pos_side_open
+        orders.append(open_item)
+
+        return orders
+    except Exception:
+        return []
+
+
+def execute_portfolio_trades_batch(decisions: list, symbol_to_price_data: dict):
+    """组合级批量下单：
+    - 收集所有币种的普通订单（不含TP/SL）
+    - 通过 /api/v5/trade/batch-orders 批量提交
+    - 随后逐币种按原逻辑设置TP/SL（策略委托），不纳入批量
+    """
+    try:
+        if not isinstance(decisions, list) or not decisions:
+            return
+
+        # 获取当前全部持仓，构建 symbol -> position 映射
+        pos_list = get_all_positions(TRADE_CONFIG.get('symbols'))
+        pos_map = {}
+        try:
+            for p in pos_list or []:
+                if isinstance(p, dict) and p.get('symbol'):
+                    pos_map[p['symbol']] = p
+        except Exception:
+            pos_map = {}
+
+        all_orders = []
+        tpsl_plan = []  # (symbol, tp, sl)
+        orig_open_sz_by_symbol = {}
+
+        for dec in decisions:
+            try:
+                sym = dec.get('symbol')
+                if sym not in symbol_to_price_data:
+                    continue
+                price_data = symbol_to_price_data.get(sym)
+                curpos = pos_map.get(sym)
+
+                # 构建普通订单（不含TP/SL）
+                orders = build_plain_orders_for_decision(sym, dec, price_data, curpos)
+                if orders:
+                    all_orders.extend(orders)
+                    # 记录原始开仓张数（用于后续判断是否因预算被缩减）
+                    try:
+                        for od in orders:
+                            if str(od.get('reduceOnly')).lower() not in ('true', '1'):
+                                orig_open_sz_by_symbol[sym] = int(float(od.get('sz')))
+                    except Exception:
+                        pass
+
+                # 记录TP/SL计划（批量下单后再逐个设置）
+                tp_val = dec.get('take_profit')
+                if tp_val is None:
+                    tp_val = dec.get('take_profit_price')
+                sl_val = dec.get('stop_loss')
+                if sl_val is None:
+                    sl_val = dec.get('stop_loss_price')
+                tpsl_plan.append((sym, tp_val, sl_val))
+            except Exception:
+                continue
+
+        # 批量前保证金预算与动态缩减
+        final_orders = []
+        executed_open_plan = {}  # sym -> {'sz': int, 'px': float}
+        if all_orders:
+            # 账户可用余额
+            usdt_free = None
+            try:
+                acct = get_account_overview() or {}
+                usdt_free = float(acct.get('usdt_free') or 0.0)
+            except Exception:
+                usdt_free = None
+            if usdt_free is None or usdt_free <= 0:
+                try:
+                    balance = _with_rate_limit_retry(lambda: exchange.fetch_balance())
+                    usdt_free = float((balance.get('USDT') or {}).get('free') or 0.0)
+                except Exception:
+                    usdt_free = 0.0
+
+            try:
+                budget_ratio = float(getattr(config, 'BATCH_MARGIN_BUDGET_RATIO', 0.8))
+                budget_usdt = max(0.0, usdt_free * budget_ratio)
+            except Exception:
+                budget_usdt = max(0.0, usdt_free * 0.8)
+
+            # 平仓单优先（不计预算），开仓单按AI信心从高到低分配
+            closers = []
+            openers = []
+            for od in all_orders:
+                try:
+                    if str(od.get('reduceOnly')).lower() in ('true', '1'):
+                        closers.append(dict(od))
+                    else:
+                        openers.append(dict(od))
+                except Exception:
+                    openers.append(dict(od))
+
+            conf_rank = {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}
+            sym_to_conf = {}
+            try:
+                for d in decisions:
+                    s = (d.get('symbol') or '').strip()
+                    c = (d.get('confidence') or 'LOW').upper()
+                    sym_to_conf[s] = conf_rank.get(c, 1)
+            except Exception:
+                sym_to_conf = {}
+            openers.sort(key=lambda x: sym_to_conf.get(x.get('symbol'), 1), reverse=True)
+
+            final_orders.extend(closers)
+            remaining_budget = float(budget_usdt)
+            for od in openers:
+                try:
+                    sym = od.get('symbol')
+                    px = float(od.get('px')) if od.get('px') is not None else float(symbol_to_price_data.get(sym, {}).get('price') or 0)
+                    if px <= 0:
+                        continue
+                    try:
+                        sz = int(float(od.get('sz')))
+                    except Exception:
+                        continue
+                    if sz <= 0:
+                        continue
+                    try:
+                        lev = int(get_symbol_leverage(sym))
+                    except Exception:
+                        lev = int(TRADE_CONFIG.get('leverage', 10) or 10)
+                    req_full = estimate_required_margin_usdt_for_symbol(sz, px, lev, sym)
+                    if req_full <= remaining_budget:
+                        final_orders.append(od)
+                        remaining_budget -= req_full
+                        executed_open_plan[sym] = {'sz': sz, 'px': px}
+                        continue
+                    req_per = max(estimate_required_margin_usdt_for_symbol(1, px, lev, sym), 1e-9)
+                    max_sz = int(remaining_budget / req_per)
+                    if max_sz >= 1:
+                        new_od = dict(od)
+                        new_od['sz'] = max_sz
+                        final_orders.append(new_od)
+                        remaining_budget -= (max_sz * req_per)
+                        executed_open_plan[sym] = {'sz': max_sz, 'px': px}
+                    # 否则跳过
+                except Exception:
+                    continue
+
+        # 批量提交普通订单（分片每批最大20单）
+        if final_orders:
+            for i in range(0, len(final_orders), 20):
+                chunk = final_orders[i:i+20]
+                resp = place_batch_orders(chunk)
+                code = str(resp.get('code')) if isinstance(resp, dict) else None
+                if code != '0':
+                    print(f"❌ 批量下单失败: {resp}")
+                else:
+                    data = resp.get('data') or []
+                    print(f"✓ 批量下单成功: {len(data)}/{len(chunk)} 条")
+                    try:
+                        failures = [d for d in data if str(d.get('sCode')) != '0']
+                        if failures:
+                            print(f"⚠️ 部分订单失败: {failures}")
+                    except Exception:
+                        pass
+
+        # 批量下单后，逐币种设置TP/SL（策略委托）——保持原有逻辑
+        for sym, tp_raw, sl_raw in tpsl_plan:
+            try:
+                tp = _parse_price_value(tp_raw)
+                sl = _parse_price_value(sl_raw)
+                if tp is None and sl is None:
+                    continue
+                try:
+                    switch_active_symbol(sym)
+                    TRADE_CONFIG['symbol'] = sym
+                except Exception:
+                    TRADE_CONFIG['symbol'] = sym
+                ok = set_position_tp_sl_for_okx(tp, sl, None)
+                if ok:
+                    print(f"{sym} 已设置/更新TP/SL → TP={tp} SL={sl}")
+                    try:
+                        set_symbol_tpsl_expected(sym, tp, sl)
+                    except Exception:
+                        pass
+                    # 轻微等待后去重，避免重复策略委托残留
+                    try:
+                        time.sleep(0.5)
+                        curpos2 = get_current_position()
+                        side_check = 'sell' if (curpos2 and curpos2.get('side') == 'long') else 'buy'
+                        dedup = deduplicate_pending_tpsl(side_check)
+                        if dedup.get('cancelled'):
+                            print(f"发现并撤销重复策略委托: {dedup.get('cancelled')}")
+                    except Exception:
+                        pass
+                # 轻微等待，避免过快命中限频
+                time.sleep(0.5)
+            except Exception:
+                continue
+
+        # 记录交易历史与更新AI实施信息（基于最终开仓计划 executed_open_plan）
+        try:
+            # 构建决策映射，方便取用信号/理由
+            dec_map = {}
+            for d in decisions:
+                try:
+                    dsym = d.get('symbol')
+                    if dsym:
+                        dec_map[dsym] = d
+                except Exception:
+                    continue
+
+            for sym, exec_info in executed_open_plan.items():
+                try:
+                    sz_exec = int(exec_info.get('sz') or 0)
+                    if sz_exec <= 0:
+                        continue
+                    ct_size_btc = float(get_contract_size_btc_for_symbol(sym))
+                    amount_btc = float(sz_exec) * ct_size_btc
+                    # 价格用于展示沿用当前价（与单币种逻辑一致）
+                    pinfo = symbol_to_price_data.get(sym) or {}
+                    disp_px = pinfo.get('price')
+                    base = 'BTC'
+                    try:
+                        base = sym.split('/')[0]
+                    except Exception:
+                        base = 'BTC'
+                    dec = dec_map.get(sym) or {}
+                    trade_record = {
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'symbol': sym,
+                        'signal': dec.get('signal') or 'HOLD',
+                        'price': disp_px,
+                        'amount': amount_btc,
+                        'base': base,
+                        'confidence': dec.get('confidence') or '-',
+                        'reason': dec.get('reason') or ''
+                    }
+                    state.web_data['trade_history'].append(trade_record)
+                    if len(state.web_data['trade_history']) > 100:
+                        state.web_data['trade_history'].pop(0)
+                    try:
+                        append_trade_to_file(trade_record)
+                    except Exception:
+                        pass
+
+                    # 更新内存中的最近AI决策项，标注实施结果
+                    try:
+                        ai_list = state.web_data.get('ai_decisions') or []
+                        # 从末尾向前找到本符号的最新一条
+                        for i in range(len(ai_list) - 1, -1, -1):
+                            if (ai_list[i] or {}).get('symbol') == sym:
+                                ai_list[i]['implemented_size'] = sz_exec
+                                ai_list[i]['implemented_side'] = (dec.get('signal') or '').upper()
+                                ai_list[i]['implemented_price'] = disp_px
+                                want_sz = orig_open_sz_by_symbol.get(sym)
+                                ai_list[i]['budget_adjusted'] = (want_sz is not None and int(want_sz) != int(sz_exec))
+                                ai_list[i]['implemented_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                                break
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 对于未产生开仓的币种（包括HOLD或预算受限未开仓），也基于AI原始回复记录一条交易记录
+        try:
+            decided_symbols = []
+            try:
+                for d in decisions:
+                    s = d.get('symbol')
+                    if s:
+                        decided_symbols.append(s)
+            except Exception:
+                decided_symbols = []
+            for sym in decided_symbols:
+                if sym in (executed_open_plan.keys() if executed_open_plan else []):
+                    continue
+                try:
+                    dec = dec_map.get(sym) or {}
+                    ct_size_btc = float(get_contract_size_btc_for_symbol(sym))
+                except Exception:
+                    ct_size_btc = 0.001
+                try:
+                    pos = pos_map.get(sym)
+                    amount_btc = float(pos.get('size') or 0) * ct_size_btc if pos else 0.0
+                except Exception:
+                    amount_btc = 0.0
+                try:
+                    pinfo = symbol_to_price_data.get(sym) or {}
+                    disp_px = pinfo.get('price')
+                    base = 'BTC'
+                    try:
+                        base = sym.split('/')[0]
+                    except Exception:
+                        base = 'BTC'
+                    trade_record = {
+                        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        'symbol': sym,
+                        'signal': (dec.get('signal') or 'HOLD'),
+                        'price': disp_px,
+                        'amount': amount_btc,
+                        'base': base,
+                        'confidence': (dec.get('confidence') or '-'),
+                        'reason': dec.get('reason') or ''
+                    }
+                    state.web_data['trade_history'].append(trade_record)
+                    if len(state.web_data['trade_history']) > 100:
+                        state.web_data['trade_history'].pop(0)
+                    try:
+                        append_trade_to_file(trade_record)
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 更新最近交易时间（全局节流）
+        try:
+            state.last_trade_time = datetime.now()
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"组合级批量下单流程失败: {e}")

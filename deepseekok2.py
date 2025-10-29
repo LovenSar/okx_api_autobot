@@ -7,7 +7,7 @@ from bot import state
 from bot.okx import get_current_position, setup_exchange, _with_rate_limit_retry
 from bot.indicators import get_btc_ohlcv_enhanced
 from bot.prompts import analyze_with_deepseek_with_retry, test_ai_connection, analyze_portfolio_with_deepseek
-from bot.trade import execute_trade
+from bot.trade import execute_trade, execute_portfolio_trades_batch
 from bot.utils import append_ai_decision_to_file, load_realized_pnl, AI_DECISIONS_LOG_PATH, append_profit_point_to_file
 
 
@@ -86,6 +86,31 @@ def trading_bot():
         print("⚠️ 未得到组合级决策，跳过本轮")
         return
 
+    # 记录本轮组合级信号/信心统计，供前端展示
+    try:
+        sig_stats = {'BUY': 0, 'SELL': 0, 'HOLD': 0}
+        conf_stats = {'HIGH': 0, 'MEDIUM': 0, 'LOW': 0}
+        for d in decisions:
+            try:
+                s = (d.get('signal') or 'HOLD').upper()
+                c = (d.get('confidence') or 'LOW').upper()
+                if s not in sig_stats:
+                    s = 'HOLD'
+                if c not in conf_stats:
+                    c = 'LOW'
+                sig_stats[s] += 1
+                conf_stats[c] += 1
+            except Exception:
+                continue
+        state.web_data['last_portfolio_stats'] = {
+            'signal_stats': sig_stats,
+            'confidence_stats': conf_stats,
+            'total_decisions': len(decisions),
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+    except Exception:
+        pass
+
     # 更新一次账户曲线（以组合视角，按当前活跃symbol）
     try:
         account_info = state.web_data.get('account_info', {})
@@ -120,7 +145,7 @@ def trading_bot():
     except Exception as e:
         print(f"更新余额失败: {e}")
 
-    # 依次应用每个币种的决策并执行
+    # 依次应用每个币种的决策（记录与准备），执行阶段改为组合级批量提交
     for dec in decisions:
         sym = dec.get('symbol')
         if sym not in sym_to_pd:
@@ -185,8 +210,14 @@ def trading_bot():
         except Exception:
             pass
 
-        # 执行
-        execute_trade(dec, price_data)
+        # 此处不再逐个下单，改为在循环结束后统一批量下单
+        pass
+
+    # 统一批量提交普通订单（不含TP/SL），随后逐币种设置TP/SL
+    try:
+        execute_portfolio_trades_batch(decisions, sym_to_pd)
+    except Exception as e:
+        print(f"批量下单阶段出错: {e}")
 
 
 def main():

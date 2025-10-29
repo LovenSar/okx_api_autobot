@@ -1034,8 +1034,8 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
       "signal": "BUY|SELL|HOLD",
       "size": 合约数量，（必填，如果当前未成交策略订单有合理的大小，则填充该大小）
       "reason": "当前币种为***，说明为什么做出这个决定，建议做多还是做空，还是继续持仓，加仓还是减仓。",
-      "stop_loss": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格）
-      "take_profit": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格）
+      "stop_loss": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格，注意要向下浮动部分）
+      "take_profit": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格，注意要向上浮动部分）
       "confidence": "HIGH|MEDIUM|LOW",
       "take_profit_price": 具体价格,（可选，如果take_profit的与当前未成交策略订单当中相等，则填充None，否则填写新价格take_profit）
       "stop_loss_price": 具体价格,（可选，注意stop_loss不同，如果stop_loss的与当前未成交策略订单当中相等，则填充None，否则填写新价格stop_loss）
@@ -1045,7 +1045,7 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
   ]
 }}
 
-    您的目标是动态调整所有仓位以最大化利润，同时保证金使用率不超过90%，并严格按照Json格式输出。
+    您的目标是动态调整所有仓位以最大化利润（初始是$1000的，但现在亏得差不多了），请你严格按照Json格式输出。
 """
 
         # 记录完整Prompt（含 messages / 字符长度）
@@ -1075,8 +1075,7 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
         model_name = os.getenv('AI_MODEL', AI_MODEL)
         response = ai_client.chat.completions.create(
             model=model_name,
-            messages=portfolio_messages,
-            temperature=0.1
+            messages=portfolio_messages
         )
         raw = _extract_ai_content(response)
         if not raw or not isinstance(raw, str):

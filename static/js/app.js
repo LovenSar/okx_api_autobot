@@ -778,7 +778,7 @@ async function updateMultiOverview() {
         if (!tbody) return;
         const items = json?.items || [];
         if (!items.length) {
-            tbody.innerHTML = '<tr><td colspan="9" class="no-data">暂无数据</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="10" class="no-data">暂无数据</td></tr>';
             return;
         }
         const rows = items.map(it => {
@@ -786,6 +786,27 @@ async function updateMultiOverview() {
             const sideText = pos ? (pos.side === 'long' ? '多头' : '空头') : '无';
             const sizeText = pos?.size || '--';
             const entryText = pos?.entry_price ? `$${Number(pos.entry_price).toFixed(2)}` : '--';
+            // 计算持仓时间
+            let holdingText = '--';
+            try {
+                const ct = pos?.create_time_ms;
+                if (ct && !isNaN(Number(ct))) {
+                    const diffSec = Math.max(0, Math.floor((Date.now() - Number(ct)) / 1000));
+                    if (diffSec >= 3600) {
+                        const h = Math.floor(diffSec / 3600);
+                        const m = Math.floor((diffSec % 3600) / 60);
+                        holdingText = m > 0 ? `${h}h${m}M` : `${h}h`;
+                    } else if (diffSec >= 60) {
+                        const m = Math.floor(diffSec / 60);
+                        const s = diffSec % 60;
+                        holdingText = s > 0 ? `${m}M${s}s` : `${m}M`;
+                    } else {
+                        holdingText = `${diffSec}s`;
+                    }
+                }
+            } catch (e) {
+                holdingText = '--';
+            }
             const pnlText = pos?.unrealized_pnl !== undefined ? `$${Number(pos.unrealized_pnl).toFixed(2)}` : '--';
             const levText = (pos && pos.leverage != null && !isNaN(Number(pos.leverage)))
                 ? `${Number(pos.leverage)}x`
@@ -797,6 +818,7 @@ async function updateMultiOverview() {
                 <td>${sideText}</td>
                 <td>${sizeText}</td>
                 <td>${entryText}</td>
+                <td>${holdingText}</td>
                 <td>${pnlText}</td>
                 <td>${levText}</td>
                 <td>${(it.tpsl_expected && it.tpsl_expected.tp != null) ? it.tpsl_expected.tp : '--'}</td>
@@ -906,6 +928,26 @@ async function updateSignalStats() {
         };
         
         confidenceChart.setOption(confidenceOption);
+        
+        // 本轮组合统计卡片
+        try {
+            const card = document.getElementById('portfolioStatsCard');
+            if (card && data.portfolio_last_round) {
+                const p = data.portfolio_last_round;
+                const totalEl = document.getElementById('portfolioTotal');
+                const sigEl = document.getElementById('portfolioSignals');
+                const confEl = document.getElementById('portfolioConf');
+                const tsEl = document.getElementById('portfolioTs');
+                const s = p.signal_stats || {};
+                const c = p.confidence_stats || {};
+                if (totalEl) totalEl.textContent = (typeof p.total_decisions === 'number') ? String(p.total_decisions) : '--';
+                if (sigEl) sigEl.textContent = `B:${s.BUY||0} / S:${s.SELL||0} / H:${s.HOLD||0}`;
+                if (confEl) confEl.textContent = `H:${c.HIGH||0} / M:${c.MEDIUM||0} / L:${c.LOW||0}`;
+                if (tsEl) tsEl.textContent = p.timestamp || '--';
+            }
+        } catch (e) {
+            // 忽略渲染错误
+        }
         
     } catch (error) {
         console.error('信号统计更新失败:', error);
