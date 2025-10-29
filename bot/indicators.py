@@ -157,6 +157,7 @@ def get_btc_ohlcv_enhanced():
 
         trend_4h = None
         boll_4h = None
+        levels_4h = None
         try:
             ohlcv_4h = _with_rate_limit_retry(lambda: exchange.fetch_ohlcv(TRADE_CONFIG['symbol'], '4h', limit=120))
             df4 = pd.DataFrame(ohlcv_4h, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -188,9 +189,12 @@ def get_btc_ohlcv_enhanced():
                 'bb_middle': middle4,
                 'bb_lower': lower4
             }
+            # 使用4H数据计算关键位（含斐波回撤）
+            levels_4h = get_support_resistance_levels(df4)
         except Exception:
             trend_4h = None
             boll_4h = None
+            levels_4h = None
 
         levels_15m = None
         kline_15m_data = None
@@ -222,7 +226,8 @@ def get_btc_ohlcv_enhanced():
         previous_data = df.iloc[-2]
 
         trend_analysis = get_market_trend(df)
-        levels_analysis = get_support_resistance_levels(df)
+        # 统一使用4H的斐波回撤与关键位；若4H获取失败，则回退到当前周期
+        levels_analysis = levels_4h if levels_4h else get_support_resistance_levels(df)
 
         try:
             symbol = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
@@ -259,6 +264,7 @@ def get_btc_ohlcv_enhanced():
             'levels_analysis': levels_analysis,
             'trend_4h': trend_4h,
             'boll_4h': boll_4h,
+            'levels_4h': levels_4h,
             'levels_15m': levels_15m,
             'kline_15m_data': kline_15m_data,
             'full_data': df

@@ -427,7 +427,7 @@ async function updateKlineChart() {
 // 更新收益曲线图
 async function updateProfitChart() {
     try {
-        const response = await fetch('/api/profit_curve?limit=10000');
+        const response = await fetch('/api/profit_curve?limit=all');
         const data = await response.json();
         
         if (!data || data.length === 0) {
@@ -614,8 +614,8 @@ async function updateAIDecisions() {
 // 更新交易记录
 async function updateTrades() {
     try {
-        // 从后端日志读取最多10000条（由后端限制最大值）
-        const response = await fetch('/api/trades?limit=10000');
+        // 从后端读取全部记录（limit=all）
+        const response = await fetch('/api/trades?limit=all');
         const data = await response.json();
         
         const tbody = document.getElementById('tradesBody');

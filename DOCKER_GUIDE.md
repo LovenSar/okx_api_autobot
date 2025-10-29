@@ -132,11 +132,10 @@ notepad .env
 **配置示例**：
 
 ```env
-# AI模型选择
-AI_PROVIDER=deepseek
-
-# DeepSeek API
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
+# OpenAI 兼容接口
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
+AI_MODEL=deepseek-reasoner
 
 # OKX交易所API
 OKX_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -404,9 +403,9 @@ docker-compose exec btc-trading-bot curl http://localhost:8080
 # 进入容器
 docker-compose exec btc-trading-bot bash
 
-# 测试网络连接
-ping -c 4 api.deepseek.com
-curl -I https://api.deepseek.com
+# 测试网络连接（以配置的 OPENAI_BASE_URL 为准）
+# 示例：
+curl -I $OPENAI_BASE_URL
 
 # 检查环境变量
 env | grep -i api
@@ -575,8 +574,9 @@ sudo systemctl restart docker
 
 ```yaml
 environment:
-  - AI_PROVIDER=deepseek
-  - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}  # 从主机环境变量读取
+  - OPENAI_BASE_URL=${OPENAI_BASE_URL}
+  - OPENAI_API_KEY=${OPENAI_API_KEY}
+  - AI_MODEL=${AI_MODEL}
 ```
 
 ---

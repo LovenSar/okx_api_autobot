@@ -9,17 +9,12 @@
 # BTC自动交易机器人配置文件
 # ========================================
 
-# ========== AI模型配置 ==========
-# 可选值: deepseek 或 qwen
-AI_PROVIDER=deepseek
-
-# DeepSeek API密钥 (如果使用DeepSeek)
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxx
-# 可选：覆盖默认模型，避免在源码里写死
-DEEPSEEK_MODEL=deepseek-chat
-
-# 阿里百炼API密钥 (如果使用Qwen)
-DASHSCOPE_API_KEY=sk-xxxxxxxxxxxxxxxx
+# ========== AI模型配置（OpenAI 兼容） ==========
+# 统一采用 OpenAI 兼容接口，支持自定义 BASE_URL 与 KEY
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxx
+# 统一模型名（可根据网关/服务商填写，如 deepseek-reasoner 或 gpt-4o-mini 等）
+AI_MODEL=deepseek-reasoner
 
 # ========== OKX交易所配置 ==========
 OKX_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -34,48 +29,19 @@ CRYPTO_ORACLE_API_KEY=your-crypto-oracle-key
 
 ---
 
-## 🤖 AI模型选择
+## 🤖 AI连接（OpenAI 兼容）
 
-### 选项1: DeepSeek (默认)
-
-```env
-AI_PROVIDER=deepseek
-DEEPSEEK_API_KEY=sk-your-deepseek-key
-```
-
-**特点：**
-- ✅ 模型：deepseek-chat
-- ✅ 成本：约0.14元/百万tokens
-- ✅ 速度：快
-- ✅ 中文理解：优秀
-- ✅ 推荐：默认选择
-
-**获取方式：**
-1. 访问：https://platform.deepseek.com/
-2. 注册并登录
-3. 创建API Key
-4. 充值使用
-
-### 选项2: 阿里百炼Qwen
+推荐使用任意 OpenAI 协议兼容的服务商（或自建网关），统一以如下方式配置：
 
 ```env
-AI_PROVIDER=qwen
-DASHSCOPE_API_KEY=sk-your-dashscope-key
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
+OPENAI_API_KEY=sk-your-key
+AI_MODEL=deepseek-reasoner  # 或 gpt-4o-mini / qwen-max 等
 ```
 
-**特点：**
-- ✅ 模型：qwen-max
-- ✅ 成本：约0.12元/百万tokens
-- ✅ 速度：较快
-- ✅ 中文理解：优秀
-- ✅ 推荐：国内用户
-
-**获取方式：**
-1. 访问：https://dashscope.console.aliyun.com/
-2. 登录阿里云账号
-3. 开通百炼服务
-4. 创建API Key
-5. 充值使用
+说明：
+- 本项目内部统一使用 `openai` 官方 SDK 的 `OpenAI(base_url=..., api_key=...)` 调用方式。
+- 为兼容历史配置，仍会回退读取 `AI_BASE_URL`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY` 等旧变量（如同时存在，以 `OPENAI_BASE_URL`/`OPENAI_API_KEY` 优先）。
 
 ---
 

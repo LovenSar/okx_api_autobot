@@ -2,6 +2,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from openai import OpenAI
+import httpx
 import ccxt
 import config
 
@@ -14,22 +15,45 @@ if not logger.handlers:
     _formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
     _handler.setFormatter(_formatter)
     logger.addHandler(_handler)
-logger.setLevel(logging.DEBUG)
+# 从环境变量控制日志级别，默认 INFO 以屏蔽 debug 噪音
+_level_name = os.getenv('LOG_LEVEL', 'INFO').upper()
+_level = getattr(logging, _level_name, logging.INFO)
+logger.setLevel(_level)
 
-# AI 客户端与模型
-AI_PROVIDER = os.getenv('AI_PROVIDER', 'deepseek').lower()
-if AI_PROVIDER == 'qwen':
-    ai_client = OpenAI(
-        api_key=os.getenv('DASHSCOPE_API_KEY'),
-        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
-    )
-    AI_MODEL = "qwen-max"
-else:
-    ai_client = OpenAI(
-        api_key=os.getenv('DEEPSEEK_API_KEY'),
-        base_url="https://api.deepseek.com"
-    )
-    AI_MODEL = "deepseek-chat"
+# AI 客户端与模型（统一为 OpenAI 兼容接口：自定义 base_url 与 api_key）
+AI_PROVIDER = os.getenv('AI_PROVIDER', 'openai_compatible').lower()
+
+_AI_BASE_URL = (
+    os.getenv('OPENAI_BASE_URL')
+    or os.getenv('AI_BASE_URL')
+    or os.getenv('DEEPSEEK_BASE_URL')
+    or "https://svip.xty.app/v1"
+)
+_AI_API_KEY = (os.getenv('DEEPSEEK_API_KEY')
+    or os.getenv('DASHSCOPE_API_KEY')
+)
+
+ai_client = OpenAI(
+    api_key=_AI_API_KEY,
+    base_url=_AI_BASE_URL,
+    http_client=httpx.Client(
+        base_url=_AI_BASE_URL,
+        follow_redirects=True,
+        timeout=httpx.Timeout(
+            connect=float(os.getenv('AI_HTTP_CONNECT_TIMEOUT', '10')),
+            read=float(os.getenv('AI_HTTP_READ_TIMEOUT', '120')),
+            write=float(os.getenv('AI_HTTP_WRITE_TIMEOUT', '120')),
+            pool=float(os.getenv('AI_HTTP_POOL_TIMEOUT', '60')),
+        ),
+    ),
+)
+
+# 统一模型名来源，优先使用 AI_MODEL，其次兼容旧变量
+AI_MODEL = (
+    os.getenv('AI_MODEL')
+    or os.getenv('DEEPSEEK_MODEL')
+    or "deepseek-reasoner"
+)
 
 # 交易所
 exchange = ccxt.okx({

@@ -92,50 +92,71 @@ def get_kline_data():
 def get_trade_history():
     """获取交易历史"""
     try:
-        # 支持通过文件尾部读取，limit 指定条数，默认100
-        limit = request.args.get('limit', default=100, type=int)
-        limit = max(1, min(limit, 10000))
+        # 支持 limit=all 返回全部记录；否则为正整数条数，默认100
+        limit_param = request.args.get('limit', default='100')
+        limit = None
+        try:
+            if isinstance(limit_param, str) and limit_param.lower() == 'all':
+                limit = None
+            else:
+                limit = int(limit_param)
+                limit = max(1, limit)
+        except Exception:
+            limit = 100
 
         items = []
         # 优先从 trades.jsonl 读取
         try:
             if os.path.exists(TRADES_LOG_PATH):
-                with open(TRADES_LOG_PATH, 'rb') as f:
-                    f.seek(0, os.SEEK_END)
-                    file_size = f.tell()
-                    buffer = bytearray()
-                    lines = []
-                    block_size = 4096
-                    pos = file_size
-                    while pos > 0 and len(lines) <= limit:
-                        read_size = block_size if pos >= block_size else pos
-                        pos -= read_size
-                        f.seek(pos)
-                        chunk = f.read(read_size)
-                        buffer[0:0] = chunk
-                        while True:
-                            newline_index = buffer.rfind(b'\n')
-                            if newline_index == -1:
-                                break
-                            line = buffer[newline_index+1:]
-                            buffer = buffer[:newline_index]
-                            if line.strip():
-                                lines.append(line)
-                            if len(lines) >= limit:
-                                break
-                    if len(lines) < limit and buffer.strip():
-                        lines.append(buffer)
-                lines = list(reversed(lines))
-                for b in lines:
-                    try:
-                        items.append(json.loads(b.decode('utf-8')))
-                    except Exception:
-                        continue
+                if limit is None:
+                    # 读取全部
+                    with open(TRADES_LOG_PATH, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            try:
+                                items.append(json.loads(line))
+                            except Exception:
+                                continue
+                else:
+                    # 高效尾部读取指定条数
+                    with open(TRADES_LOG_PATH, 'rb') as f:
+                        f.seek(0, os.SEEK_END)
+                        file_size = f.tell()
+                        buffer = bytearray()
+                        lines = []
+                        block_size = 4096
+                        pos = file_size
+                        while pos > 0 and len(lines) <= limit:
+                            read_size = block_size if pos >= block_size else pos
+                            pos -= read_size
+                            f.seek(pos)
+                            chunk = f.read(read_size)
+                            buffer[0:0] = chunk
+                            while True:
+                                newline_index = buffer.rfind(b'\n')
+                                if newline_index == -1:
+                                    break
+                                line = buffer[newline_index+1:]
+                                buffer = buffer[:newline_index]
+                                if line.strip():
+                                    lines.append(line)
+                                if len(lines) >= limit:
+                                    break
+                        if len(lines) < limit and buffer.strip():
+                            lines.append(buffer)
+                    lines = list(reversed(lines))
+                    for b in lines:
+                        try:
+                            items.append(json.loads(b.decode('utf-8')))
+                        except Exception:
+                            continue
         except Exception:
             items = []
 
         if not items:
-            items = deepseekok2.web_data['trade_history'][-limit:]
+            if limit is None:
+                items = deepseekok2.web_data['trade_history'][:]
+            else:
+                items = deepseekok2.web_data['trade_history'][-limit:]
 
         return jsonify(items)
     except Exception as e:
@@ -271,50 +292,69 @@ def get_signal_history():
 
 @app.route('/api/profit_curve')
 def get_profit_curve():
-    """获取收益曲线数据：优先从日志文件读取，支持 limit（默认1000，最大20000），失败回退内存。"""
+    """获取收益曲线数据：优先从日志文件读取，支持 limit（默认1000 或 all），失败回退内存。"""
     try:
-        limit = request.args.get('limit', default=1000, type=int)
-        limit = max(1, min(limit, 20000))
+        limit_param = request.args.get('limit', default='1000')
+        limit = None
+        try:
+            if isinstance(limit_param, str) and limit_param.lower() == 'all':
+                limit = None
+            else:
+                limit = int(limit_param)
+                limit = max(1, limit)
+        except Exception:
+            limit = 1000
 
         items = []
         try:
             if os.path.exists(PROFIT_CURVE_LOG_PATH):
-                with open(PROFIT_CURVE_LOG_PATH, 'rb') as f:
-                    f.seek(0, os.SEEK_END)
-                    file_size = f.tell()
-                    buffer = bytearray()
-                    lines = []
-                    block_size = 4096
-                    pos = file_size
-                    while pos > 0 and len(lines) <= limit:
-                        read_size = block_size if pos >= block_size else pos
-                        pos -= read_size
-                        f.seek(pos)
-                        chunk = f.read(read_size)
-                        buffer[0:0] = chunk
-                        while True:
-                            newline_index = buffer.rfind(b'\n')
-                            if newline_index == -1:
-                                break
-                            line = buffer[newline_index+1:]
-                            buffer = buffer[:newline_index]
-                            if line.strip():
-                                lines.append(line)
-                            if len(lines) >= limit:
-                                break
-                    if len(lines) < limit and buffer.strip():
-                        lines.append(buffer)
-                lines = list(reversed(lines))
-                for b in lines:
-                    try:
-                        items.append(json.loads(b.decode('utf-8')))
-                    except Exception:
-                        continue
+                if limit is None:
+                    with open(PROFIT_CURVE_LOG_PATH, 'r', encoding='utf-8') as f:
+                        for line in f:
+                            try:
+                                items.append(json.loads(line))
+                            except Exception:
+                                continue
+                else:
+                    with open(PROFIT_CURVE_LOG_PATH, 'rb') as f:
+                        f.seek(0, os.SEEK_END)
+                        file_size = f.tell()
+                        buffer = bytearray()
+                        lines = []
+                        block_size = 4096
+                        pos = file_size
+                        while pos > 0 and len(lines) <= limit:
+                            read_size = block_size if pos >= block_size else pos
+                            pos -= read_size
+                            f.seek(pos)
+                            chunk = f.read(read_size)
+                            buffer[0:0] = chunk
+                            while True:
+                                newline_index = buffer.rfind(b'\n')
+                                if newline_index == -1:
+                                    break
+                                line = buffer[newline_index+1:]
+                                buffer = buffer[:newline_index]
+                                if line.strip():
+                                    lines.append(line)
+                                if len(lines) >= limit:
+                                    break
+                        if len(lines) < limit and buffer.strip():
+                            lines.append(buffer)
+                    lines = list(reversed(lines))
+                    for b in lines:
+                        try:
+                            items.append(json.loads(b.decode('utf-8')))
+                        except Exception:
+                            continue
         except Exception:
             items = []
 
         if not items:
-            items = deepseekok2.web_data['profit_curve'][-limit:]
+            if limit is None:
+                items = deepseekok2.web_data['profit_curve'][:]
+            else:
+                items = deepseekok2.web_data['profit_curve'][-limit:]
 
         return jsonify(items)
     except Exception as e:

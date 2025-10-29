@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import pandas as pd
 from datetime import datetime
 
@@ -15,6 +16,59 @@ from .okx import (
     _parse_price_value,
 )
 from .utils import safe_json_parse, extract_error_info
+
+
+def _extract_ai_content(resp):
+    try:
+        # OpenAI Python SDK 对象（v1），带 choices 属性
+        choices = getattr(resp, 'choices', None)
+        if choices:
+            ch0 = choices[0]
+            msg = getattr(ch0, 'message', None)
+            if msg is not None:
+                content = getattr(msg, 'content', None)
+                if content:
+                    return content
+                if isinstance(msg, dict) and msg.get('content'):
+                    return msg.get('content')
+            # 一些兼容实现可能提供 text 字段
+            txt = getattr(ch0, 'text', None)
+            if txt:
+                return txt
+
+        # 字典响应
+        if isinstance(resp, dict):
+            chs = resp.get('choices')
+            if isinstance(chs, list) and chs:
+                ch0 = chs[0]
+                if isinstance(ch0, dict):
+                    msg = ch0.get('message') or ch0.get('delta') or {}
+                    if isinstance(msg, dict) and msg.get('content'):
+                        return msg.get('content')
+                    if 'text' in ch0 and ch0.get('text'):
+                        return ch0.get('text')
+            # 其他常见键
+            for k in ('output_text', 'message', 'content', 'data'):
+                v = resp.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+
+        # 纯字符串（可能是网关返回）
+        if isinstance(resp, str):
+            s = resp.strip()
+            ls = s.lower()
+            # 如果是 HTML 页面，视为无效响应
+            if ls.startswith('<!doctype') or ls.startswith('<html') or '<html' in ls:
+                return None
+            if s.startswith('{') and s.endswith('}'):
+                try:
+                    return _extract_ai_content(json.loads(s))
+                except Exception:
+                    return s
+            return s
+    except Exception:
+        return None
+    return None
 
 
 def _format_prev_ai_raw_for_prompt(max_chars: int = 800) -> str:
@@ -40,9 +94,10 @@ def test_ai_connection():
             model=AI_MODEL,
             messages=[{"role": "user", "content": "Hello"}],
             max_tokens=10,
-            timeout=10.0
+            timeout=float(os.getenv('AI_TEST_TIMEOUT_SECONDS', '15'))
         )
-        if response and response.choices:
+        content = _extract_ai_content(response)
+        if content:
             state.web_data['ai_model_info']['status'] = 'connected'
             state.web_data['ai_model_info']['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             state.web_data['ai_model_info']['error_message'] = None
@@ -64,6 +119,41 @@ def test_ai_connection():
         code_text = err_code if err_code is not None else 'N/A'
         print(f"❌ {AI_PROVIDER.upper()} 连接失败: [{err_type} {code_text}] {e}")
         return False
+
+
+def _compute_total_unrealized_pnl_all_symbols(current_symbol: str, current_pos: dict) -> float:
+    """聚合所有已配置交易对的浮动盈亏（含其他仓）。
+
+    优先使用 state 符号桶缓存的 last_position，避免在生成 Prompt 时频繁触发私有接口限频。
+    当前活跃符号的持仓直接使用传入的 current_pos。
+    """
+    try:
+        total = 0.0
+        # 当前符号先计入
+        if current_pos and isinstance(current_pos.get('unrealized_pnl'), (int, float)):
+            total += float(current_pos['unrealized_pnl'])
+
+        symbols = TRADE_CONFIG.get('symbols', [current_symbol] if current_symbol else [])
+        seen = set()
+        for sym in symbols:
+            try:
+                if not sym or sym in seen:
+                    continue
+                seen.add(sym)
+                if current_symbol and sym == current_symbol:
+                    continue
+                bucket = state.ensure_symbol_bucket(sym)
+                pos = bucket.get('last_position') if isinstance(bucket, dict) else None
+                if pos and (pos.get('unrealized_pnl') is not None):
+                    total += float(pos.get('unrealized_pnl') or 0.0)
+            except Exception:
+                continue
+        return float(total)
+    except Exception:
+        try:
+            return float(current_pos.get('unrealized_pnl') or 0.0) if current_pos else 0.0
+        except Exception:
+            return 0.0
 
 
 def generate_technical_analysis_text(price_data):
@@ -137,6 +227,13 @@ def analyze_with_deepseek(price_data):
     position_text = "无持仓" if not current_pos else f"{current_pos['side']}仓, 数量: {current_pos['size']}, 盈亏: {current_pos['unrealized_pnl']:.2f}USDT"
     pnl_text = f", 持仓盈亏: {current_pos['unrealized_pnl']:.2f} USDT" if current_pos else ""
 
+    # 计算多合约总浮盈亏（含其他仓）
+    try:
+        _cur_symbol_for_total = TRADE_CONFIG.get('symbol', 'BTC/USDT:USDT')
+    except Exception:
+        _cur_symbol_for_total = 'BTC/USDT:USDT'
+    total_unreal_all = _compute_total_unrealized_pnl_all_symbols(_cur_symbol_for_total, current_pos)
+
     try:
         open_orders = get_open_orders_pending(limit=20)
         open_orders_text = format_open_orders_for_prompt(open_orders, max_items=10)
@@ -165,7 +262,7 @@ def analyze_with_deepseek(price_data):
                 f"- 阻力: {lv15.get('static_resistance',0):.2f} 支撑: {lv15.get('static_support',0):.2f}"
                 f"  (BOLL上: {lv15.get('bb_upper',0):.2f} 中: {lv15.get('bb_middle',0):.2f} 下: {lv15.get('bb_lower',0):.2f})\n"
             )
-        # 新增：斐波纳契与枢轴位简述
+        # 新增：斐波纳契与枢轴位简述（Fib统一使用4H）
         if price_data.get('levels_analysis'):
             la = price_data['levels_analysis']
             fib = la.get('fibonacci') or {}
@@ -179,9 +276,9 @@ def analyze_with_deepseek(price_data):
                 piv_text = (f"PP:{piv.get('pp',0):.2f} R1:{piv.get('r1',0):.2f} S1:{piv.get('s1',0):.2f} "
                             f"R2:{piv.get('r2',0):.2f} S2:{piv.get('s2',0):.2f}")
             if fib_text:
-                mtf_text += f"【斐波纳契回撤】{fib_text}\n"
+                mtf_text += f"【斐波纳契回撤(4H)】{fib_text}\n"
             if piv_text:
-                mtf_text += f"【枢轴位】{piv_text}\n"
+                mtf_text += f"【枢轴位(日)】{piv_text}\n"
     except Exception:
         pass
 
@@ -211,6 +308,7 @@ def analyze_with_deepseek(price_data):
     {sentiment_text}  # 情绪分析（如有）
 
     {mtf_text}  # 多周期补充（如有）
+    【执行规则】止盈与止损均需基于4H级别的斐波纳契回撤与4H关键支撑/阻力。
 
     【当前行情】
     - 当前价格: ${price_data['price']:,.2f}
@@ -220,6 +318,7 @@ def analyze_with_deepseek(price_data):
     - 本K线成交量: {price_data['volume']:.2f} {base}
     - 价格变化: {price_data['price_change']:+.2f}%
     - 当前持仓: {position_text}{pnl_text}
+    - 多合约总浮盈亏（含其他仓）: ${total_unreal_all:,.2f}
     - 当前未成交普通订单（最多10条）：
     {open_orders_text}
     - 当前未成交策略订单（最多10条）：
@@ -232,28 +331,117 @@ def analyze_with_deepseek(price_data):
     - RSI (15m): {price_data['technical_data'].get('rsi', 0):.1f} ({'超买' if price_data['technical_data'].get('rsi', 0) > 70 else '超卖' if price_data['technical_data'].get('rsi', 0) < 30 else '中性'})
     - MACD 方向 (15m): {price_data['trend_analysis'].get('macd', 'N/A')}
     - 布林带位置 (4H): {price_data['boll_4h'].get('bb_position', 0):.2%} ({'上部' if price_data['boll_4h'].get('bb_position', 0) > 0.7 else '下部' if price_data['boll_4h'].get('bb_position', 0) < 0.3 else '中部'})
-    - 斐波纳契回撤 (15m): {price_data['levels_analysis'].get('fibonacci', {}).get('fib_23_6', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_38_2', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_50', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_61_8', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_78_6', 0):.2f}
-    - 枢轴位 (15m): {price_data['levels_analysis'].get('pivots', {}).get('pp', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r2', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s2', 0):.2f}
+    - 斐波纳契回撤 (4H): {price_data['levels_analysis'].get('fibonacci', {}).get('fib_23_6', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_38_2', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_50', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_61_8', 0):.2f} {price_data['levels_analysis'].get('fibonacci', {}).get('fib_78_6', 0):.2f}
+    - 枢轴位 (日): {price_data['levels_analysis'].get('pivots', {}).get('pp', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s1', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('r2', 0):.2f} {price_data['levels_analysis'].get('pivots', {}).get('s2', 0):.2f}
 
     【前两次AI原始回复（供一致性参考）】
     {prev_ai_raw}
 
-    【分析要求】
-    请依据以上情况，根据当前持仓情况给出明确交易指令，可以考虑分仓操作，对于浮亏的仓位，可以考虑加仓操作，对于盈利的仓位，可以考虑减仓操作。
-    但是要注意鸡蛋不要放在一个篮子里，不要把所有仓位都放在一个方向上，要考虑风险分散。
-    同时“贪多嚼不烂”，不要同时操作多个仓位，别人恐惧我贪婪，别人贪婪我恐惧。
+# 交易策略评估与优化建议
 
-    【风险与杠杆提示】
-    - 基线杠杆建议: {baseline_lev}x（可根据波动率、趋势强度、信心度在合理范围内微调）
-    - 若波动扩大、流动性变差或信心降低，适当降低杠杆；反之可小幅提高
-    - 不可过度频繁变更杠杆，优先保持稳定的风险敞口
+## 一、策略合适性分析
 
-    【执行规则】
-    - 若需要为“已有持仓”设置止盈/止损：如已存在同方向TP或SL，须先撤销旧单再设置新的TP/SL。
-    - 如给出止盈/止损，请明确具体价格（美元），不要给相对百分比或范围。
-    - 价格触发类型按 last 价格。
-    - 对于BTC和ETH，可适当提高杠杆，对于其他币种，可适当降低杠杆。
-    - 尽量设置止盈止损的时候，采用布林带上下轨作为参考、关键位、斐波纳契回撤位、支撑阻力位、移动平均线、相对价格等作为参考。
+### 核心优势
+- **风险分散良好**：单一方向/行业/币种持仓≤20%，有效降低非系统性风险
+- **杠杆管理灵活**：根据市场状况动态调整，避免过度暴露
+- **止盈止损规则具体**：强调盈亏比≥2:1，使用具体价格而非百分比，减少主观决策
+- **纪律性强**：逆向思维操作，避免情绪化交易
+
+### 需要调整的细节
+
+#### 1. 长影针分析修正
+**原策略问题**：
+> "长影针是阳线→可能反转；长影针是阴线→可能继续上涨"
+
+**正确解读**：
+- **长上影线**（高价区）：上涨受阻，可能下跌反转（尤其伴随放量）
+- **长下影线**（低价区）：下跌受阻，可能上涨反转
+
+**建议修正**：
+- 出现长上影线时警惕回调
+- 出现长下影线时关注反弹
+- 需结合其他指标确认信号
+
+#### 2. 止损止盈浮动幅度
+**问题**：固定5%浮动可能不合理
+- 浮动过大→止损失效或止盈过早
+- 忽略市场波动差异
+
+**优化建议**：
+- 使用ATR（平均真实波幅）指标动态调整浮动范围
+- 高波动品种扩大缓冲，低波动品种缩小缓冲
+
+#### 3. 其他合理规则
+- 单次调仓≤15%
+- 同时操作≤3个仓位
+- 防止过度交易
+
+## 二、止盈止损设置指南
+
+### 1. 止损设置原则
+
+**技术依据**：
+- 4H布林带、关键支撑/阻力位
+- 斐波那契回撤位、均线（50/200日）
+- 避免15分钟布林带上下轨（噪音大）
+
+**具体方法**：
+
+多头仓位：
+止损位 = 关键支撑下方 + 波动缓冲
+示例：BTC买入价50,000，支撑48,000
+      止损设$47,500（支撑下方约1%）
+
+空头仓位：
+止损位 = 关键阻力上方 + 波动缓冲
+
+
+**浮动缓冲调整**：
+- 根据品种波动性设定（如BTC日均波动3%→缓冲2-3%）
+- 使用ATR指标量化波动幅度
+
+### 2. 止盈设置原则
+
+**盈亏比优先**：
+- 风险回报比≥2:1
+- 止损距离$500 → 止盈距离≥$1,000
+
+**分批止盈策略**：
+| 盈利水平 | 操作建议 | 备注 |
+|---------|---------|------|
+| 15% | 止盈1/3仓位 | 第一目标 |
+| 25% | 再止盈1/3仓位 | 第二目标 |
+| >25% | 移动止损保护 | 让利润奔跑 |
+
+**技术参考位**：
+- 阻力位、斐波那契扩展位
+- 4H布林带上中下轨
+- 避免强阻力区一次性止盈
+
+**示例**：
+
+ETH买入价3,000，止损2,800（风险$200）
+第一止盈：3,400（盈利400，盈亏比2:1）
+第二止盈：$3,600（参考前期阻力）
+
+
+### 3. 账户整体管理
+
+**浮盈状态**（总盈亏>0）：
+- 优先止盈或减仓
+- 将浮盈落袋为安
+
+**浮亏状态**（总盈亏≤0）：
+- 不情绪化操作
+- 仅调整保护性止损或保持原计划
+
+### 4. 常见错误避免
+
+- ✅ 使用具体美元价格，非固定百分比
+- ✅ 结合市场情绪指标（恐惧贪婪指数）
+  - 指数<20：可暂缓止损
+  - 指数>80：提前止盈
+
 
     请用以下 JSON 格式回复：
     {{
@@ -273,7 +461,7 @@ def analyze_with_deepseek(price_data):
 
     try:
         print(f"⏳ 正在调用{AI_PROVIDER.upper()} API ({AI_MODEL})...")
-        model_name = os.getenv('DEEPSEEK_MODEL', AI_MODEL)
+        model_name = os.getenv('AI_MODEL', AI_MODEL)
         response = ai_client.chat.completions.create(
             model=model_name,
             messages=[
@@ -282,23 +470,53 @@ def analyze_with_deepseek(price_data):
             ],
             stream=False,
             temperature=0.1,
-            timeout=60.0
+            timeout=float(os.getenv('AI_REQUEST_TIMEOUT_SECONDS', '60'))
         )
-        print("✓ API调用成功")
-        state.web_data['ai_model_info']['status'] = 'connected'
-        state.web_data['ai_model_info']['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        state.web_data['ai_model_info']['error_message'] = None
-
-        if not response or not response.choices:
-            print(f"❌ {AI_PROVIDER.upper()}返回空响应")
+        result = _extract_ai_content(response)
+        if not result:
+            try:
+                resp_type = type(response).__name__
+                preview_text = None
+                if isinstance(response, dict):
+                    try:
+                        preview_text = json.dumps(response)[:600]
+                    except Exception:
+                        preview_text = str(response)
+                else:
+                    dumped = None
+                    try:
+                        md = getattr(response, 'model_dump_json', None)
+                        if callable(md):
+                            dumped = md()
+                    except Exception:
+                        dumped = None
+                    if not dumped:
+                        try:
+                            dumped = getattr(response, 'json', None)
+                            if callable(dumped):
+                                dumped = dumped()
+                        except Exception:
+                            dumped = None
+                    if not dumped:
+                        dumped = str(response)
+                    preview_text = str(dumped)
+                preview = (preview_text or '')
+                preview = preview.replace('\n', ' ')[:600]
+                print(f"❌ {AI_PROVIDER.upper()}返回空响应 (type={resp_type}, preview={preview})")
+            except Exception:
+                print(f"❌ {AI_PROVIDER.upper()}返回空响应 (无法打印详细信息)")
             state.web_data['ai_model_info']['status'] = 'error'
             state.web_data['ai_model_info']['error_message'] = '响应为空'
             return create_fallback_signal(price_data)
 
-        result = response.choices[0].message.content
-        if not result:
+        if not isinstance(result, str) or not result.strip():
             print(f"❌ {AI_PROVIDER.upper()}返回空内容")
             return create_fallback_signal(price_data)
+
+        print("✓ API调用成功")
+        state.web_data['ai_model_info']['status'] = 'connected'
+        state.web_data['ai_model_info']['last_check'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        state.web_data['ai_model_info']['error_message'] = None
 
         print(f"\n{'='*60}")
         print(f"{AI_PROVIDER.upper()}原始回复:")

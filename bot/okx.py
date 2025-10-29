@@ -2,6 +2,8 @@ import os
 import json
 import logging
 import time
+import threading
+import queue
 import requests
 import config
 from datetime import datetime
@@ -9,6 +11,82 @@ from datetime import datetime
 from .context import exchange, TRADE_CONFIG, logger, get_symbol_leverage
 from .state import ensure_symbol_bucket
 from .state import ACCOUNT_POS_MODE
+
+
+class _OkxRequestTask:
+    def __init__(self, fn):
+        self.fn = fn
+        self.event = threading.Event()
+        self.result = None
+        self.exc = None
+
+
+class OkxRequestDispatcher:
+    """集中派发OKX请求：单线程顺序执行，请求速率限制为每秒N次。"""
+
+    def __init__(self, max_rps: int = 5):
+        self.max_rps = max(1, int(max_rps))
+        self._queue = queue.Queue()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="OkxRequestDispatcher", daemon=True)
+        self._thread.start()
+
+    def submit(self, fn):
+        # 避免在派发线程内部再次提交导致死锁：直接执行
+        if threading.current_thread() is self._thread:
+            return fn()
+
+        task = _OkxRequestTask(fn)
+        self._queue.put(task)
+        task.event.wait()
+        if task.exc is not None:
+            raise task.exc
+        return task.result
+
+    def _run(self):
+        interval = 1.0 / float(self.max_rps)
+        last_ts = 0.0
+        while not self._stop.is_set():
+            try:
+                task = self._queue.get(timeout=0.1)
+            except Exception:
+                continue
+            # 速率控制：确保相邻两次执行至少间隔 interval 秒
+            now = time.monotonic()
+            wait = interval - (now - last_ts)
+            if wait > 0:
+                try:
+                    time.sleep(wait)
+                except Exception:
+                    pass
+            try:
+                task.result = task.fn()
+            except Exception as e:
+                task.exc = e
+            finally:
+                last_ts = time.monotonic()
+                task.event.set()
+                try:
+                    self._queue.task_done()
+                except Exception:
+                    pass
+
+
+def _get_max_rps_default():
+    try:
+        val = os.getenv('OKX_MAX_RPS')
+        if val is not None and str(val).strip() != '':
+            return max(1, int(val))
+    except Exception:
+        pass
+    try:
+        return max(1, int(getattr(config, 'OKX_MAX_RPS', 5)))
+    except Exception:
+        return 5
+
+
+# 全局派发器：集中限流到每秒5次（可通过环境变量 OKX_MAX_RPS 或 config.OKX_MAX_RPS 覆盖）
+REQUEST_DISPATCHER = OkxRequestDispatcher(max_rps=_get_max_rps_default())
 
 
 def _with_rate_limit_retry(callable_fn, max_retries: int = None, wait_seconds: int = 30):
@@ -21,7 +99,8 @@ def _with_rate_limit_retry(callable_fn, max_retries: int = None, wait_seconds: i
     attempt = 0
     while True:
         try:
-            resp = callable_fn()
+            # 所有请求通过全局派发器集中限流与顺序执行
+            resp = REQUEST_DISPATCHER.submit(callable_fn)
             try:
                 if isinstance(resp, dict):
                     code = str(resp.get('code')) if 'code' in resp else None

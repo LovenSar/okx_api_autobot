@@ -20,11 +20,11 @@ pip install -r requirements.txt
 
 ### 3) 配置 `.env`
 ```env
-# AI: deepseek | qwen
-AI_PROVIDER=deepseek
-DEEPSEEK_API_KEY=sk-xxx
-# 若用 Qwen：
-# DASHSCOPE_API_KEY=sk-xxx
+# OpenAI 兼容接口（自定义 BASE_URL 与 KEY）
+OPENAI_BASE_URL=https://your-openai-compatible-endpoint/v1
+OPENAI_API_KEY=sk-xxx
+# 可选：统一配置模型名（也可在运行时覆盖）
+AI_MODEL=deepseek-reasoner  # 如使用官方OpenAI可填 gpt-4o-mini 等
 
 # OKX API（需交易权限）
 OKX_API_KEY=xxx
