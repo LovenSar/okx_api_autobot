@@ -173,6 +173,18 @@ def execute_trade(signal_data, price_data):
 
         base_amount_btc = TRADE_CONFIG['amount']
         desired_contracts = btc_amount_to_okx_contracts(base_amount_btc)
+        # 若AI提供了显式合约张数（size/sz），优先采用
+        try:
+            raw_size = signal_data.get('size')
+            if raw_size is None:
+                raw_size = signal_data.get('sz')
+            if raw_size is not None:
+                szv = int(float(raw_size))
+                if szv > 0:
+                    print(f"AI指定下单张数: {szv} (覆盖默认 {desired_contracts})")
+                    desired_contracts = szv
+        except Exception:
+            pass
         mark_price = price_data['price']
         # 使用每币种杠杆进行保证金估算
         try:

@@ -34,10 +34,10 @@ ai_client = OpenAI(
         base_url=_AI_BASE_URL,
         follow_redirects=True,
         timeout=httpx.Timeout(
-            connect=float(os.getenv('AI_HTTP_CONNECT_TIMEOUT', '10')),
-            read=float(os.getenv('AI_HTTP_READ_TIMEOUT', '120')),
-            write=float(os.getenv('AI_HTTP_WRITE_TIMEOUT', '120')),
-            pool=float(os.getenv('AI_HTTP_POOL_TIMEOUT', '60')),
+            connect=float(os.getenv('AI_HTTP_CONNECT_TIMEOUT', '180')),
+            read=float(os.getenv('AI_HTTP_READ_TIMEOUT', '180')),
+            write=float(os.getenv('AI_HTTP_WRITE_TIMEOUT', '180')),
+            pool=float(os.getenv('AI_HTTP_POOL_TIMEOUT', '180')),
         ),
     ),
 )

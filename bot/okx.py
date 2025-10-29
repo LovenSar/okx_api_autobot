@@ -794,6 +794,85 @@ def get_current_position():
         return None
 
 
+def get_all_positions(symbols: list = None) -> list:
+    """获取全部(或指定列表)合约的当前持仓，标准化输出。
+
+    返回列表元素结构：
+    {
+        'symbol': 'BTC/USDT:USDT',
+        'side': 'long'|'short',
+        'size': float,            # 合约张数
+        'entry_price': float,
+        'unrealized_pnl': float,
+        'leverage': float
+    }
+    """
+    results = []
+    try:
+        syms = None
+        try:
+            if symbols and isinstance(symbols, list) and len(symbols) > 0:
+                syms = symbols
+        except Exception:
+            syms = None
+        try:
+            pos_list = _with_rate_limit_retry(lambda: exchange.fetch_positions(syms))
+        except Exception:
+            pos_list = []
+        for pos in (pos_list or []):
+            try:
+                contracts = float(pos.get('contracts') or 0)
+                if contracts <= 0:
+                    continue
+                results.append({
+                    'symbol': pos.get('symbol'),
+                    'side': pos.get('side'),
+                    'size': contracts,
+                    'entry_price': float(pos.get('entryPrice') or 0),
+                    'unrealized_pnl': float(pos.get('unrealizedPnl') or 0),
+                    'leverage': float(pos.get('leverage') or get_symbol_leverage(pos.get('symbol')))
+                })
+            except Exception:
+                continue
+        return results
+    except Exception:
+        return results
+
+
+def get_account_overview() -> dict:
+    """获取账户概览（USDT自由余额与总权益）。失败返回空字典。"""
+    try:
+        bal = _with_rate_limit_retry(lambda: exchange.fetch_balance())
+        return {
+            'usdt_free': float((bal.get('USDT') or {}).get('free') or 0.0),
+            'usdt_total': float((bal.get('USDT') or {}).get('total') or 0.0),
+        }
+    except Exception:
+        return {}
+
+
+def format_positions_overview_for_prompt(positions: list) -> str:
+    """将多合约持仓概览格式化为多行文本。"""
+    try:
+        if not positions:
+            return "无持仓"
+        lines = []
+        for idx, p in enumerate(positions, start=1):
+            try:
+                sym = p.get('symbol')
+                side = (p.get('side') or '-').lower()
+                size = p.get('size')
+                ep = p.get('entry_price')
+                upnl = p.get('unrealized_pnl')
+                lev = p.get('leverage')
+                lines.append(f"{idx}) {sym} {side} 张:{size} 入场:{ep} UPNL:{upnl:.2f} L:{lev}")
+            except Exception:
+                continue
+        return "\n".join(lines) if lines else "无持仓"
+    except Exception:
+        return "无持仓"
+
+
 def set_position_tp_sl_for_okx(tp_price: float = None, sl_price: float = None, pos_side: str = None) -> bool:
     try:
         if tp_price is None and sl_price is None:
