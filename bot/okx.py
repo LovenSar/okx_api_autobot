@@ -744,6 +744,7 @@ def get_algo_orders_pending(limit: int = 20) -> list:
                     'algoId': item.get('algoId') or item.get('algoID') or item.get('id'),
                     'side': (item.get('side') or '').lower(),
                     'ordType': (item.get('ordType') or '').lower(),
+                    'sz': item.get('sz'),
                     'tpTriggerPx': item.get('tpTriggerPx'),
                     'slTriggerPx': item.get('slTriggerPx'),
                     'tpOrdPx': item.get('tpOrdPx'),
@@ -795,7 +796,7 @@ def verify_tp_sl_against_pending(expected_tp: float = None, expected_sl: float =
 
 
 def deduplicate_pending_tpsl(side: str = None) -> dict:
-    summary = {'cancelled': [], 'groups': {'tp': {}, 'sl': {}}}
+    summary = {'cancelled': [], 'groups': {'tp': {}, 'sl': {}}, 'recreated': [], 'adjusted': {'tp': 0, 'sl': 0}}
     try:
         inst_id = _get_okx_inst_id()
         resp = _with_rate_limit_retry(lambda: exchange.privateGetTradeOrdersAlgoPending({'instId': inst_id, 'ordType': 'conditional'}))
@@ -812,6 +813,44 @@ def deduplicate_pending_tpsl(side: str = None) -> dict:
             except Exception:
                 return str(px)
 
+        # 当前持仓侧与张数
+        pos_side = None
+        pos_size_contracts = 0
+        try:
+            curpos = get_current_position()
+            if curpos:
+                pos_side = curpos.get('side')
+                if curpos.get('size'):
+                    pos_size_contracts = int(float(curpos['size']))
+        except Exception:
+            pos_side = None
+            pos_size_contracts = 0
+
+        # 订单方向（保护单应为反向，若未提供side，以当前持仓推断）
+        order_side = None
+        try:
+            if side:
+                order_side = side.lower()
+            else:
+                if (pos_side or '').lower() == 'long':
+                    order_side = 'sell'
+                elif (pos_side or '').lower() == 'short':
+                    order_side = 'buy'
+        except Exception:
+            order_side = None
+
+        # 期望的TP/SL（若之前存过）
+        expected_tp = None
+        expected_sl = None
+        try:
+            b = ensure_symbol_bucket(TRADE_CONFIG.get('symbol'))
+            tpsl_expected = (b.get('tpsl_expected') or {}) if isinstance(b, dict) else {}
+            expected_tp = tpsl_expected.get('tp')
+            expected_sl = tpsl_expected.get('sl')
+        except Exception:
+            expected_tp = None
+            expected_sl = None
+
         for item in data:
             try:
                 if item.get('instId') != inst_id:
@@ -826,16 +865,21 @@ def deduplicate_pending_tpsl(side: str = None) -> dict:
                     continue
                 tpx = item.get('tpTriggerPx')
                 slx = item.get('slTriggerPx')
+                try:
+                    sz_val = int(float(item.get('sz') or 0))
+                except Exception:
+                    sz_val = 0
                 if tpx not in (None, ''):
                     key = _round_px(tpx)
-                    summary['groups']['tp'].setdefault(key, []).append({'algoId': algo_id, 'cTime': item.get('cTime')})
+                    summary['groups']['tp'].setdefault(key, []).append({'algoId': algo_id, 'cTime': item.get('cTime'), 'sz': sz_val, 'px': key})
                 if slx not in (None, ''):
                     key = _round_px(slx)
-                    summary['groups']['sl'].setdefault(key, []).append({'algoId': algo_id, 'cTime': item.get('cTime')})
+                    summary['groups']['sl'].setdefault(key, []).append({'algoId': algo_id, 'cTime': item.get('cTime'), 'sz': sz_val, 'px': key})
             except Exception:
                 continue
 
         cancel_ids = []
+        keepers_by_kind = {'tp': [], 'sl': []}
         for kind in ('tp', 'sl'):
             for key, arr in summary['groups'][kind].items():
                 if len(arr) > 1:
@@ -843,9 +887,13 @@ def deduplicate_pending_tpsl(side: str = None) -> dict:
                         arr_sorted = sorted(arr, key=lambda x: int(x.get('cTime') or 0))
                     except Exception:
                         arr_sorted = arr
-                    keep = arr_sorted[-1]['algoId'] if arr_sorted else None
+                    keep = arr_sorted[-1] if arr_sorted else None
+                    if keep:
+                        keepers_by_kind[kind].append(keep)
                     for obj in arr_sorted[:-1]:
                         cancel_ids.append(obj['algoId'])
+                elif len(arr) == 1:
+                    keepers_by_kind[kind].append(arr[0])
 
         if cancel_ids:
             try:
@@ -855,6 +903,92 @@ def deduplicate_pending_tpsl(side: str = None) -> dict:
                 summary['cancelled'] = cancelled if cancelled else cancel_ids
             except Exception:
                 pass
+
+        # 校验每类(TP/SL)策略委托总张数与持仓是否一致，不一致则用期望价或保留价重建为持仓张数
+        if pos_size_contracts and pos_size_contracts > 0 and order_side:
+            # 准备下单基础参数
+            try:
+                step_local, _dec_local = _get_okx_price_tick_info()
+                if step_local is None or step_local <= 0:
+                    step_local = 0.1
+            except Exception:
+                step_local = 0.1
+
+            for kind in ('tp', 'sl'):
+                try:
+                    keepers = keepers_by_kind.get(kind) or []
+                    total_sz = 0
+                    for k in keepers:
+                        try:
+                            total_sz += int(k.get('sz') or 0)
+                        except Exception:
+                            continue
+
+                    need_adjust = (len(keepers) > 0 and total_sz != pos_size_contracts)
+                    need_create_if_absent = (len(keepers) == 0 and ((kind == 'tp' and expected_tp is not None) or (kind == 'sl' and expected_sl is not None)))
+
+                    target_px = None
+                    if kind == 'tp':
+                        if expected_tp is not None:
+                            target_px = float(expected_tp)
+                        elif len(keepers) > 0:
+                            try:
+                                target_px = float(keepers[-1].get('px'))
+                            except Exception:
+                                target_px = None
+                    else:
+                        if expected_sl is not None:
+                            target_px = float(expected_sl)
+                        elif len(keepers) > 0:
+                            try:
+                                target_px = float(keepers[-1].get('px'))
+                            except Exception:
+                                target_px = None
+
+                    ids_to_cancel_now = []
+                    if need_adjust:
+                        try:
+                            ids_to_cancel_now = [k.get('algoId') for k in keepers if k.get('algoId')]
+                        except Exception:
+                            ids_to_cancel_now = []
+
+                    if ids_to_cancel_now:
+                        try:
+                            entries = [{'algoId': cid, 'instId': inst_id} for cid in ids_to_cancel_now]
+                            res2 = cancel_algo_orders(entries)
+                            cancelled2 = res2.get('cancelled', []) if isinstance(res2, dict) else []
+                            summary['cancelled'].extend(cancelled2 if cancelled2 else ids_to_cancel_now)
+                        except Exception:
+                            pass
+
+                    if (need_adjust or need_create_if_absent) and (target_px is not None):
+                        try:
+                            req = {
+                                'instId': inst_id,
+                                'tdMode': 'cross',
+                                'side': order_side,
+                                'reduceOnly': 'true',
+                                'ordType': 'conditional',
+                                'sz': str(int(pos_size_contracts)),
+                            }
+                            if ACCOUNT_POS_MODE == 'long_short' and (pos_side or '').lower() in ('long', 'short'):
+                                req['posSide'] = pos_side
+                            if kind == 'tp':
+                                req['tpTriggerPx'] = _format_price_for_okx(target_px)
+                                req['tpOrdPx'] = _format_price_for_okx(target_px - step_local) if order_side == 'sell' else _format_price_for_okx(target_px + step_local)
+                                req['tpTriggerPxType'] = 'last'
+                            else:
+                                req['slTriggerPx'] = _format_price_for_okx(target_px)
+                                req['slOrdPx'] = _format_price_for_okx(target_px - step_local) if order_side == 'sell' else _format_price_for_okx(target_px + step_local)
+                                req['slTriggerPxType'] = 'last'
+
+                            _with_rate_limit_retry(lambda: exchange.privatePostTradeOrderAlgo({k: v for k, v in req.items() if v is not None}))
+                            summary['recreated'].append({'kind': kind, 'px': _format_price_for_okx(target_px), 'sz': int(pos_size_contracts)})
+                            summary['adjusted'][kind] = int(pos_size_contracts)
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
 
         return summary
     except Exception:

@@ -274,8 +274,7 @@ def execute_trade(signal_data, price_data):
                     realized = (entry - close_price) * size_contracts * ct_size_btc
                 except Exception:
                     realized = 0.0
-                close_px = compute_aggressive_limit_price('buy', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=current_position['size'], price=close_px, params=params))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=current_position['size'], params=params))
                 try:
                     update_win_statistics(realized, size_contracts)
                 except Exception:
@@ -286,8 +285,7 @@ def execute_trade(signal_data, price_data):
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
                 p2 = params
-                open_px = compute_aggressive_limit_price('buy', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px, params=p2))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=p2))
                 state.realized_profit_usdt += realized
                 save_realized_pnl()
                 try:
@@ -311,8 +309,7 @@ def execute_trade(signal_data, price_data):
                                     if state.ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'long'
                                     p3 = params
-                                    add_px = compute_aggressive_limit_price('buy', mark_price)
-                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=add_contracts, price=add_px, params=p3))
+                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=add_contracts, params=p3))
                                     state.pyramid_adds_long += 1
                                     state.last_pyramid_ts = now_ts
                                     print(f"连涨加仓完成，累计加仓次数(long)={state.pyramid_adds_long}")
@@ -336,8 +333,7 @@ def execute_trade(signal_data, price_data):
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'long'
                 p1 = params
-                open_px2 = compute_aggressive_limit_price('buy', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='buy', amount=long_size, price=open_px2, params=p1))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='buy', amount=long_size, params=p1))
                 try:
                     executed_contracts += int(long_size)
                 except Exception:
@@ -358,8 +354,7 @@ def execute_trade(signal_data, price_data):
                     realized = (close_price - entry) * size_contracts * ct_size_btc
                 except Exception:
                     realized = 0.0
-                close_px = compute_aggressive_limit_price('sell', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=current_position['size'], price=close_px, params=params))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=current_position['size'], params=params))
                 try:
                     update_win_statistics(realized, size_contracts)
                 except Exception:
@@ -370,8 +365,7 @@ def execute_trade(signal_data, price_data):
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
                 p4 = params
-                open_px = compute_aggressive_limit_price('sell', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px, params=p4))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=p4))
                 state.realized_profit_usdt += realized
                 save_realized_pnl()
                 try:
@@ -395,8 +389,7 @@ def execute_trade(signal_data, price_data):
                                     if state.ACCOUNT_POS_MODE == 'long_short':
                                         params['posSide'] = 'short'
                                     p5 = params
-                                    add_px = compute_aggressive_limit_price('sell', mark_price)
-                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=add_contracts, price=add_px, params=p5))
+                                    _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=add_contracts, params=p5))
                                     state.pyramid_adds_short += 1
                                     state.last_pyramid_ts = now_ts
                                     print(f"连跌加仓完成，累计加仓次数(short)={state.pyramid_adds_short}")
@@ -420,8 +413,7 @@ def execute_trade(signal_data, price_data):
                 if state.ACCOUNT_POS_MODE == 'long_short':
                     params['posSide'] = 'short'
                 p6 = params
-                open_px3 = compute_aggressive_limit_price('sell', mark_price)
-                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='limit', side='sell', amount=short_size, price=open_px3, params=p6))
+                _with_rate_limit_retry(lambda: exchange.create_order(symbol=TRADE_CONFIG['symbol'], type='market', side='sell', amount=short_size, params=p6))
                 try:
                     executed_contracts += int(short_size)
                 except Exception:
@@ -559,6 +551,12 @@ def build_plain_orders_for_decision(symbol: str, decision: dict, price_data: dic
             return []
 
         orders = []
+        # 订单类型：允许通过配置切换为市价单（默认限价）
+        try:
+            use_mkt = int(getattr(config, 'BATCH_USE_MARKET', 0)) == 1
+        except Exception:
+            use_mkt = False
+        order_type = 'market' if use_mkt else 'limit'
         new_side = 'long' if signal == 'BUY' else 'short'
 
         # 双向或净值模式下的 posSide 设置
@@ -579,11 +577,12 @@ def build_plain_orders_for_decision(symbol: str, decision: dict, price_data: dic
                     close_item = {
                         'symbol': symbol,
                         'side': close_side,
-                        'ordType': 'limit',
+                        'ordType': order_type,
                         'sz': int(float(current_position.get('size'))),
-                        'px': float(close_px),
                         'reduceOnly': True,
                     }
+                    if not use_mkt:
+                        close_item['px'] = float(close_px)
                     try:
                         if ACCOUNT_POS_MODE == 'long_short':
                             close_item['posSide'] = cur_side
@@ -595,20 +594,17 @@ def build_plain_orders_for_decision(symbol: str, decision: dict, price_data: dic
         except Exception:
             pass
 
-        # 开仓单（不含TP/SL）
+        # 开仓/加仓单（不含TP/SL）
         open_side = 'buy' if signal == 'BUY' else 'sell'
-        # 如果已有同向持仓，当前版本不进行批量加仓，保持现状
-        if current_position and current_position.get('side') == new_side:
-            return orders
-
         open_px = compute_aggressive_limit_price(open_side, mark_price)
         open_item = {
             'symbol': symbol,
             'side': open_side,
-            'ordType': 'limit',
+            'ordType': order_type,
             'sz': int(desired_contracts),
-            'px': float(open_px),
         }
+        if not use_mkt:
+            open_item['px'] = float(open_px)
         if pos_side_open:
             open_item['posSide'] = pos_side_open
         orders.append(open_item)
