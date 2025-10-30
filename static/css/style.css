@@ -322,7 +322,7 @@ body {
 /* 底部区域 */
 .bottom-section {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr 1fr; /* 双列布局：同一行显示 */
     gap: 20px;
     margin-bottom: 30px;
     align-items: stretch; /* 让两侧卡片等高 */

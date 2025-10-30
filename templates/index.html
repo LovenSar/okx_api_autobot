@@ -196,35 +196,8 @@
             </div>
         </div>
 
-        <!-- 下半部分：AI决策 + 交易记录 -->
+        <!-- 下半部分：交易记录 + 信号分布统计（单列） -->
         <div class="bottom-section">
-            <!-- AI决策 -->
-            <div class="card ai-card">
-                <div class="card-header">
-                    <i class="fas fa-brain"></i>
-                    <h3>AI实时决策</h3>
-                </div>
-                <div class="card-body">
-                    <div class="ai-latest" id="latestDecision">
-                        <div class="ai-signal">
-                            <span class="signal-badge">--</span>
-                            <span class="confidence-badge">--</span>
-                        </div>
-                        <div class="ai-reason">等待AI分析...</div>
-                        <div class="ai-prices">
-                            <span class="stop-loss">止损: --</span>
-                            <span class="take-profit">止盈: --</span>
-                        </div>
-                    </div>
-                    <div id="nextDecisionCountdown" style="color: #9ca3af; margin-top: 8px; font-size: 0.9em;">
-                        下次决策: -- 秒
-                    </div>
-                    <div class="ai-history" id="aiHistory">
-                        <!-- AI历史决策 -->
-                    </div>
-                </div>
-            </div>
-
             <!-- 交易记录 -->
             <div class="card trades-card">
                 <div class="card-header">
@@ -253,10 +226,7 @@
                     </div>
                 </div>
             </div>
-        </div>
-
-        <!-- 信号统计图表 -->
-        <div class="stats-section">
+            <!-- 信号统计图表 -->
             <div class="card stats-card">
                 <div class="card-header">
                     <i class="fas fa-chart-pie"></i>
@@ -271,20 +241,7 @@
             </div>
         </div>
 
-        <!-- UserPrompt 浏览区块 -->
-        <div class="stats-section">
-            <div class="card" id="promptsCard">
-                <div class="card-header">
-                    <i class="fas fa-file-alt"></i>
-                    <h3>用户 Prompt 记录（最近20条）</h3>
-                </div>
-                <div class="card-body">
-                    <div id="userPromptsList" style="max-height: 320px; overflow-y: auto;">
-                        <div class="no-data" style="text-align: center; color: #9ca3af; padding: 12px;">加载中...</div>
-                    </div>
-                </div>
-            </div>
-        </div>
+        
     </div>
 
     <script src="/static/js/app.js"></script>

@@ -446,6 +446,13 @@ def analyze_with_deepseek(price_data):
     {algo_orders_text}
     ====
 
+【预算与下单约束（严格遵守）】
+- 先进行预算校验：使用“USDT可用余额”估算本次建议所需保证金；若为多币种组合，则需合计所有建议单的所需保证金。
+- 计算口径：名义价值≈ 合约张数×合约面值×价格；所需保证金≈ 名义价值 ÷ 杠杆。
+- 严格限制：合计所需保证金 ≤ 可用余额×0.8；若超出则必须下调 size（或HOLD），直到满足；如仍低于交易所最低名义价值门槛（例如≥$20），则返回 HOLD。
+- 请在 reason 中明确写明“预算校验通过/预算不足已下调/预算不足放弃”，并尽量给出所需保证金估算值。
+- 可选字段：budget_ok(true/false), required_margin_usdt(数值), nominal_value_usdt(数值)。
+
 【执行规则】
 - 止盈与止损均需基于4H级别的斐波纳契回撤与4
 - 只有盈亏比大于2:1的才考虑建仓；如果已经建仓了，止盈止损都要以斐波纳契回撤、4H关键支撑/阻力为准；
@@ -487,7 +494,7 @@ def analyze_with_deepseek(price_data):
             {{
                 "symbol": "{symbol}",
                 "signal": "BUY|SELL|HOLD",
-                "reason": "针对该币种的操作理由，是否做多/做空/持仓/加仓/减仓。",
+                "reason": "针对该币种的操作理由，是否做多/做空/持仓/加仓/减仓，并写明预算校验结果",
                 "stop_loss": 具体价格（若不设置请返回 null），
                 "take_profit": 具体价格（若不设置请返回 null），
                 "confidence": "HIGH|MEDIUM|LOW",
@@ -495,7 +502,11 @@ def analyze_with_deepseek(price_data):
                 "trade_type": "LONG|SHORT|HOLD|ADD|REDUCE",
                 "take_profit_price": 具体价格或 null（与take_profit不同字段同义兜底），
                 "stop_loss_price": 具体价格或 null（与stop_loss不同字段同义兜底），
-                "leverage": 整数，建议使用的杠杆（范围1-50；默认{baseline_lev}）
+                "leverage": 整数，建议使用的杠杆（范围1-50；默认{baseline_lev}）, 
+                "size": 合约张数（若预算不足需下调；不足最低门槛则返回HOLD）, 
+                "budget_ok": true|false, 
+                "required_margin_usdt": 数值, 
+                "nominal_value_usdt": 数值
             }}
             // 其余监控币种按相同结构逐一给出
         ]
@@ -506,7 +517,7 @@ def analyze_with_deepseek(price_data):
 
     # 记录与调用的统一消息体
     messages = [
-        {"role": "system", "content": f"您是一位专业的交易员，专注于{TRADE_CONFIG['timeframe']}周期趋势分析。请结合K线形态和技术指标做出判断，并严格遵循JSON格式要求。"},
+        {"role": "system", "content": f"您是一位专业的交易员，专注于{TRADE_CONFIG['timeframe']}周期趋势分析。请结合K线形态和技术指标做出判断，并严格遵循JSON格式要求。严格执行预算校验：不得超出可用余额/保证金下达订单；预算不足则HOLD或下调size，并在理由中说明。"},
         {"role": "user", "content": prompt}
     ]
 
@@ -1251,6 +1262,16 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
 名义价值 = 账户余额 × position_size% × leverage
 必须确保: 名义价值 ≥ $20 USDT (Binance最低要求)
 
+【预算与下单约束（组合级，必须遵守）】
+- 先进行预算校验：合并所有建议仓位的所需保证金，确保合计所需保证金 ≤ 可用余额×0.8。
+- 计算口径：名义价值≈ 合约张数×合约面值×价格；所需保证金≈ 名义价值 ÷ 杠杆。
+- 若合计超出预算：
+  1) 优先下调各币种 size（从低确定性/低盈亏比开始）；
+  2) 如仍不足，直接将部分币种设置为 HOLD；
+  3) 若某币种名义价值不足最低门槛（如≥$20），该币种返回 HOLD。
+- 输出时在每个决策的 reason 中写明“预算校验通过/预算不足已下调/预算不足放弃”，并尽量给出所需保证金估算值。
+- 每个决策可附加可选字段：budget_ok(true/false), required_margin_usdt(数值), nominal_value_usdt(数值)。
+
 ═══════════════════════════════════════════════════════════
 [TARGET] **高级仓位管理策略** (NEW! 9大专业策略可用):
 ═══════════════════════════════════════════════════════════
@@ -1376,14 +1397,17 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
     {{
       "symbol": "必须为以下之一: {', '.join(symbols)}",
       "signal": "BUY|SELL|HOLD",
-      "size": 合约数量，（必填，如果当前未成交策略订单有合理的大小，则填充该大小）
-      "reason": "当前币种为***，说明为什么做出这个决定，建议做多还是做空，还是继续持仓，加仓还是减仓。",
+      "size": 合约数量，（必填，若预算不足需下调；不足最低门槛则返回HOLD）
+      "reason": "当前币种为***，说明为什么做出这个决定，并写明预算校验结果",
       "stop_loss": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格，注意要向下浮动部分）
       "take_profit": 具体价格，（必填，如果当前未成交策略订单有合理的价格，则填充该价格，注意要向上浮动部分）
       "confidence": "HIGH|MEDIUM|LOW",
       "take_profit_price": 具体价格,（可选，如果take_profit的与当前未成交策略订单当中相等，则填充None，否则填写新价格take_profit）
       "stop_loss_price": 具体价格,（可选，注意stop_loss不同，如果stop_loss的与当前未成交策略订单当中相等，则填充None，否则填写新价格stop_loss）
-      "leverage": 整数(1-50) 或省略
+      "leverage": 整数(1-50) 或省略,
+      "budget_ok": true|false,
+      "required_margin_usdt": 数值,
+      "nominal_value_usdt": 数值
     }}
     // 其余币种按相同结构追加
   ]
@@ -1393,7 +1417,7 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
         # 记录完整Prompt（含 messages / 字符长度）
         try:
             portfolio_messages = [
-                {"role": "system", "content": "您是一位专业的交易员，负责编排多币种持仓以提升总仓位。请结合多币种数据并严格输出JSON。"},
+                {"role": "system", "content": "您是一位专业的交易员，负责编排多币种持仓以提升总仓位。请结合多币种数据并严格输出JSON。严格执行预算校验：合计所需保证金不得超过可用余额的80%；预算不足需下调size或返回HOLD，并在理由中说明。"},
                 {"role": "user", "content": prompt}
             ]
             append_prompt_to_file({
@@ -1408,7 +1432,7 @@ def analyze_portfolio_with_deepseek(symbol_to_price_data: dict) -> list:
             })
         except Exception:
             portfolio_messages = [
-                {"role": "system", "content": "您是一位专业的交易员，负责编排多币种持仓以提升总仓位。请结合多币种数据并严格输出JSON。"},
+                {"role": "system", "content": "您是一位专业的交易员，负责编排多币种持仓以提升总仓位。请结合多币种数据并严格输出JSON。严格执行预算校验：合计所需保证金不得超过可用余额的80%；预算不足需下调size或返回HOLD，并在理由中说明。"},
                 {"role": "user", "content": prompt}
             ]
             pass

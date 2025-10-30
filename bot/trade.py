@@ -26,6 +26,7 @@ from .context import exchange
 from .okx import _with_rate_limit_retry
 from .state import set_symbol_tpsl_expected, ACCOUNT_POS_MODE, switch_active_symbol
 from .utils import update_win_statistics, save_realized_pnl, append_trade_to_file
+from .indicators import get_btc_ohlcv_enhanced
 
 
 def execute_trade(signal_data, price_data):
@@ -640,7 +641,63 @@ def execute_portfolio_trades_batch(decisions: list, symbol_to_price_data: dict):
 
         for dec in decisions:
             try:
-                sym = dec.get('symbol')
+                # 兼容异常键名（如 symbol*），以及可能提供的 instId
+                sym = dec.get('symbol') or dec.get('symbol*') or dec.get('sym')
+                if not sym:
+                    try:
+                        inst_id_fallback = dec.get('instId') or dec.get('inst_id')
+                        if inst_id_fallback:
+                            # 优先使用交易所映射，其次基于常见命名规则转换
+                            try:
+                                m = getattr(exchange, 'markets_by_id', {}).get(inst_id_fallback)
+                                if isinstance(m, dict):
+                                    sym = m.get('symbol')
+                            except Exception:
+                                sym = None
+                            if not sym:
+                                try:
+                                    parts = str(inst_id_fallback).split('-')
+                                    if len(parts) >= 2 and parts[1] == 'USDT':
+                                        sym = f"{parts[0]}/USDT:USDT"
+                                except Exception:
+                                    sym = None
+                    except Exception:
+                        sym = None
+                if not sym:
+                    continue
+
+                # 若缺少该symbol的行情快照，现场拉取一份，避免跳过开单
+                if sym not in symbol_to_price_data:
+                    try:
+                        switch_active_symbol(sym)
+                        TRADE_CONFIG['symbol'] = sym
+                    except Exception:
+                        TRADE_CONFIG['symbol'] = sym
+                    pd_obj_tmp = None
+                    try:
+                        pd_obj_tmp = get_btc_ohlcv_enhanced()
+                    except Exception:
+                        pd_obj_tmp = None
+                    if not pd_obj_tmp:
+                        # 兜底：仅取当前价
+                        try:
+                            tk = _with_rate_limit_retry(lambda: exchange.fetch_ticker(sym))
+                            last_px = None
+                            try:
+                                last_px = float(tk.get('last')) if tk.get('last') is not None else None
+                            except Exception:
+                                last_px = None
+                            if last_px is None:
+                                try:
+                                    last_px = float(tk.get('close')) if tk.get('close') is not None else None
+                                except Exception:
+                                    last_px = None
+                            if last_px is not None:
+                                pd_obj_tmp = {'price': last_px}
+                        except Exception:
+                            pd_obj_tmp = None
+                    if pd_obj_tmp:
+                        symbol_to_price_data[sym] = pd_obj_tmp
                 if sym not in symbol_to_price_data:
                     continue
                 price_data = symbol_to_price_data.get(sym)
@@ -748,7 +805,20 @@ def execute_portfolio_trades_batch(decisions: list, symbol_to_price_data: dict):
                         final_orders.append(new_od)
                         remaining_budget -= (max_sz * req_per)
                         executed_open_plan[sym] = {'sz': max_sz, 'px': px}
-                    # 否则跳过
+                    else:
+                        # 不足一张时，保底对齐到 1 张，允许突破预算比例
+                        try:
+                            new_od = dict(od)
+                            new_od['sz'] = 1
+                            final_orders.append(new_od)
+                            remaining_budget -= req_per
+                            executed_open_plan[sym] = {'sz': 1, 'px': px}
+                            try:
+                                print(f"⚠️ 预算不足，{sym} 保底下单 1 张（估算占用保证金: {req_per:.2f} USDT）")
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
                 except Exception:
                     continue
 

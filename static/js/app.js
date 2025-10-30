@@ -553,7 +553,7 @@ async function updateKlineChart() {
 // 更新收益曲线图
 async function updateProfitChart() {
     try {
-        const response = await fetch('/api/profit_curve?limit=all');
+        const response = await fetch('/api/profit_curve?limit=1000');
         const data = await response.json();
         
         if (!data || data.length === 0) {
@@ -577,13 +577,33 @@ async function updateProfitChart() {
             timestamps.push(date.toLocaleString('zh-CN', {
                 month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit'
             }));
-            profitRates.push(item.profit_rate.toFixed(2));
-            profits.push(item.profit.toFixed(2));
-            equities.push(item.equity.toFixed(2));
+            // 使用数值类型，避免抽样/进度渲染异常
+            const pr = (item && item.profit_rate != null) ? Number(item.profit_rate) : null;
+            const pf = (item && item.profit != null) ? Number(item.profit) : null;
+            const eq = (item && item.equity != null) ? Number(item.equity) : null;
+            profitRates.push(pr);
+            profits.push(pf);
+            equities.push(eq);
         });
         
+        // 前端限流：若点数过多则按步长抽样，避免一次渲染过多点导致卡顿
+        const MAX_POINTS = 1500;
+        let renderTimestamps = timestamps;
+        let renderProfitRates = profitRates;
+        let renderProfits = profits;
+        let renderEquities = equities;
+        if (timestamps.length > MAX_POINTS) {
+            const step = Math.ceil(timestamps.length / MAX_POINTS);
+            const downsample = (arr) => arr.filter((_, idx) => (idx % step) === 0 || idx === arr.length - 1);
+            renderTimestamps = downsample(timestamps);
+            renderProfitRates = downsample(profitRates);
+            renderProfits = downsample(profits);
+            renderEquities = downsample(equities);
+        }
+
         const option = {
             backgroundColor: 'transparent',
+            animation: false,
             tooltip: {
                 trigger: 'axis',
                 axisPointer: { type: 'cross', label: { backgroundColor: '#6a7985' } },
@@ -593,9 +613,9 @@ async function updateProfitChart() {
                 formatter: function(params) {
                     let result = params[0].name + '<br/>';
                     params.forEach(param => {
-                        result += '<span style="display:inline-block;margin-right:5px;border-radius:10px;width:10px;height:10px;background-color:' + param.color + ';"></span>';
-                        result += param.seriesName + ': ' + param.value;
-                        result += (param.seriesName === '收益率') ? '%<br/>' : ' USDT<br/>';
+                        const val = (typeof param.value === 'number') ? param.value : Number(param.value);
+                        const txt = (param.seriesName === '收益率') ? `${val.toFixed(2)}%` : `${val.toFixed(2)} USDT`;
+                        result += '<span style="display:inline-block;margin-right:5px;border-radius:10px;width:10px;height:10px;background-color:' + param.color + ';"></span>' + param.seriesName + ': ' + txt + '<br/>';
                     });
                     return result;
                 }
@@ -609,7 +629,7 @@ async function updateProfitChart() {
             xAxis: {
                 type: 'category',
                 boundaryGap: false,
-                data: timestamps,
+                data: renderTimestamps,
                 axisLine: { lineStyle: { color: '#2d2d44' } },
                 axisLabel: { color: '#9ca3af', rotate: 45 },
                 splitLine: { show: true, lineStyle: { color: '#2d2d44' } }
@@ -643,7 +663,11 @@ async function updateProfitChart() {
                     name: '收益率',
                     type: 'line',
                     yAxisIndex: 0,
-                    data: profitRates,
+                    data: renderProfitRates,
+                    showSymbol: false,
+                    sampling: 'lttb',
+                    progressive: 1000,
+                    progressiveThreshold: 3000,
                     smooth: true,
                     lineStyle: { width: 3, color: { type: 'linear', x: 0, y: 0, x2: 1, y2: 0,
                         colorStops: [{ offset: 0, color: '#1a73e8' }, { offset: 1, color: '#34a853' }] } },
@@ -656,7 +680,11 @@ async function updateProfitChart() {
                     name: '累计盈亏',
                     type: 'line',
                     yAxisIndex: 1,
-                    data: profits,
+                    data: renderProfits,
+                    showSymbol: false,
+                    sampling: 'lttb',
+                    progressive: 1000,
+                    progressiveThreshold: 3000,
                     smooth: true,
                     lineStyle: { width: 2, color: '#fbbc04' },
                     itemStyle: { color: '#fbbc04' }
@@ -665,7 +693,11 @@ async function updateProfitChart() {
                     name: '账户权益',
                     type: 'line',
                     yAxisIndex: 1,
-                    data: equities,
+                    data: renderEquities,
+                    showSymbol: false,
+                    sampling: 'lttb',
+                    progressive: 1000,
+                    progressiveThreshold: 3000,
                     smooth: true,
                     lineStyle: { width: 2, color: '#34a853', type: 'dashed' },
                     itemStyle: { color: '#34a853' }
@@ -683,6 +715,11 @@ async function updateProfitChart() {
 // 更新AI决策
 async function updateAIDecisions() {
     try {
+        // 若页面不存在对应容器，直接返回，避免不必要请求
+        const latestDiv = document.getElementById('latestDecision');
+        const historyDiv = document.getElementById('aiHistory');
+        if (!latestDiv || !historyDiv) return;
+
         const response = await fetch('/api/ai_decisions?limit=100');
         const data = await response.json();
         
@@ -690,7 +727,6 @@ async function updateAIDecisions() {
         
         // 显示最新决策
         const latest = data[data.length - 1];
-        const latestDiv = document.getElementById('latestDecision');
         
         latestDiv.innerHTML = `
             <div class="ai-signal">
@@ -714,7 +750,6 @@ async function updateAIDecisions() {
         }
         
         // 显示历史决策
-        const historyDiv = document.getElementById('aiHistory');
         const historyHTML = data.slice(0, Math.max(0, data.length - 1)).reverse().map(decision => `
             <div class="ai-history-item">
                 <div style="display: flex; justify-content: space-between; margin-bottom: 5px;">
@@ -740,8 +775,8 @@ async function updateAIDecisions() {
 // 更新交易记录
 async function updateTrades() {
     try {
-        // 从后端读取全部记录（limit=all）
-        const response = await fetch('/api/trades?limit=all');
+        // 仅读取最近100条
+        const response = await fetch('/api/trades?limit=100');
         const data = await response.json();
         
         const tbody = document.getElementById('tradesBody');
@@ -759,7 +794,7 @@ async function updateTrades() {
                 <td>$${trade.price.toFixed(2)}</td>
                 <td>${trade.amount} ${trade.base || ''}</td>
                 <td><span class="confidence-badge ${trade.confidence}" style="font-size: 0.75em; padding: 3px 8px;">${trade.confidence}</span></td>
-                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${trade.reason}">${trade.reason}</td>
+                <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85em;" title="${trade.reason}">${trade.reason}</td>
             </tr>
         `).join('');
         
